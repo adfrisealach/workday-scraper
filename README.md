@@ -5,39 +5,31 @@
 <a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg"></a>
 </p>
 
-A robust web scraper to get the latest job postings from Workday sites.
+A robust web scraper to get the latest job postings from Workday sites using JSON-LD extraction for significantly improved performance.
 
 ## Features
 
+- **10-20x faster** than traditional scraping methods using JSON-LD extraction
+- No browser dependencies required (no Selenium, no ChromeDriver)
 - Scrape listings from any standard Workday job posting site
 - Custom site list in text config file
 - JSON and RSS file output
 - Email notification
 - Mode for all listings or only listings posted today
-- Enhanced error handling and debugging capabilities
-- Automatic ChromeDriver management
-- Adaptive rate limiting to avoid overwhelming servers
-- Efficient session management for better performance
-- Controlled parallel processing with chunking
+- Asynchronous processing for better performance
 - Comprehensive logging system
 
 ## Setup
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/christopherlam888/workday-scraper.git
+   git clone https://github.com/adfrisealach/workday-scraper.git
    cd workday-scraper
    ```
 
-2. Run the setup script to install dependencies:
-   ```bash
-   ./setup_environment.sh
-   ```
-   
-   Or manually install dependencies:
+2. Install dependencies:
    ```bash
    pip install -r requirements.txt
-   pip install webdriver-manager
    ```
 
 3. Create a config file in the `configs/` directory with your target companies:
@@ -53,69 +45,77 @@ A robust web scraper to get the latest job postings from Workday sites.
 python -m workday_scraper -f <config_file>
 ```
 
-### With Email Notification
+Where `<config_file>` is the name of a file in the configs/ directory (e.g., autodesk.txt, alex.txt, etc.)
+
+### Command-line Arguments
+
+#### Required Arguments:
+- `-f, --file`: Config file name in the configs/ directory
+
+#### Email Notification Arguments (all three required if any are used):
+- `-e, --email`: Email address to send notifications from
+- `-pw, --password`: Password for the email account
+- `-r, --recipients`: Comma-separated list of email recipients
+
+#### Output Options:
+- `-i, --initial`: Scrape all job listings, not just today's
+- `-nj, --no-json`: Skip JSON output
+- `-nr, --no-rss`: Skip RSS output
+
+#### Performance Options:
+- `-mw, --max-workers`: Maximum number of concurrent workers for parallel processing (default: 5)
+- `-cs, --chunk-size`: Number of jobs to process in each chunk (default: 10)
+
+#### Logging Options:
+- `-l, --log-file`: Path to the log file (default: workday_scraper.log)
+- `-ll, --log-level`: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) (default: INFO)
+
+### Examples
+
+#### With Email Notification
 
 ```bash
-python -m workday_scraper -f <config_file> -e your.email@gmail.com -pw your-password -r recipient@example.com
+python -m workday_scraper -f autodesk.txt -e your.email@gmail.com -pw your-password -r recipient@example.com
 ```
 
-### For All Job Listings (Not Just Today's)
+#### For All Job Listings (Not Just Today's)
 
 ```bash
-python -m workday_scraper -f <config_file> -i
+python -m workday_scraper -f autodesk.txt -i
 ```
 
-### With Performance Options
+#### With Performance Options
 
 ```bash
-python -m workday_scraper -f <config_file> -ms 5 -mw 10 -cs 20
+python -m workday_scraper -f autodesk.txt -mw 10 -cs 20
 ```
 
-Where:
-- `-ms` or `--max-sessions`: Maximum number of concurrent browser sessions (default: 3)
-- `-mw` or `--max-workers`: Maximum number of concurrent workers for parallel processing (default: 5)
-- `-cs` or `--chunk-size`: Number of jobs to process in each chunk (default: 10)
-
-### With Logging Options
+#### With Logging Options
 
 ```bash
-python -m workday_scraper -f <config_file> -l custom_log.log -ll DEBUG
+python -m workday_scraper -f autodesk.txt -l custom_log.log -ll DEBUG
 ```
 
-Where:
-- `-l` or `--log-file`: Path to the log file (default: workday_scraper.log)
-- `-ll` or `--log-level`: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) (default: INFO)
+## Output Files
 
-## Enhanced Debugging
+The script generates the following output files in the current working directory:
 
-If you encounter issues with specific Workday sites, use the enhanced debugging scraper:
-
-```bash
-python workday_scraper_enhanced.py -f <config_file> -d
-```
-
-The `-d` or `--debug` flag enables debug mode with more verbose output and tries different selectors to find job elements.
-
-You can also run the browser in visible mode (not headless) for better debugging:
-
-```bash
-python workday_scraper_enhanced.py -f <config_file> -nh
-```
+- `job_postings.json`: Contains all scraped job information in JSON format
+- `rss.xml`: Contains the same information in RSS format
+- `job_ids.json`: Tracks which job IDs have been scraped to avoid duplicates
 
 ## Architecture
 
 The Workday Scraper is built with a modular architecture that separates concerns and provides better control over the scraping process:
 
+- **JSON-LD Extraction**: Uses structured data embedded in the pages for reliable and fast extraction
+- **Asynchronous Processing**: Uses asyncio for efficient concurrent processing
 - **Logging System**: Structured logging with context-aware information
 - **Error Handling**: Comprehensive error handling with specific exception types and recovery strategies
-- **Element Selection**: Robust element selection with multiple fallback selectors
-- **Rate Limiting**: Adaptive rate limiting to avoid overwhelming servers
-- **Session Management**: Efficient session management for better performance
-- **Parallel Processing**: Controlled parallel processing with chunking
 
 ## Supported Sites
 
-Any standard Workday job posting site. If you encounter a site that doesn't work, please use the enhanced debugging scraper to diagnose the issue.
+Any standard Workday job posting site that includes JSON-LD structured data. The scraper automatically tries different URL formats to find the best one for each site.
 
 ## Features To Implement
 

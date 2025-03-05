@@ -32,28 +32,6 @@ fi
 echo "Installing required dependencies..."
 pip install -r requirements.txt
 
-# Install webdriver-manager
-echo "Installing webdriver-manager for easier ChromeDriver management..."
-pip install webdriver-manager
-
-# Check if ChromeDriver is already installed
-if ! command -v chromedriver &> /dev/null; then
-    echo "ChromeDriver not found in PATH."
-    echo "The webdriver-manager will handle ChromeDriver installation automatically."
-    echo "Alternatively, you can install ChromeDriver manually:"
-    echo "  - macOS: brew install --cask chromedriver"
-    echo "  - Linux: Use your package manager or download from https://chromedriver.chromium.org/"
-    echo "  - Windows: Download from https://chromedriver.chromium.org/"
-fi
-
-# Check if Chrome is installed
-if ! command -v google-chrome &> /dev/null && ! command -v google-chrome-stable &> /dev/null && ! [ -d "/Applications/Google Chrome.app" ]; then
-    echo "Warning: Google Chrome not detected. Please install Chrome to use this scraper."
-    echo "  - macOS: brew install --cask google-chrome"
-    echo "  - Linux: Use your package manager or download from https://www.google.com/chrome/"
-    echo "  - Windows: Download from https://www.google.com/chrome/"
-fi
-
 # Create logs directory
 echo "Creating logs directory..."
 mkdir -p logs
@@ -74,10 +52,4 @@ echo ""
 echo "To run the scraper, use:"
 echo "  python -m workday_scraper -f <config_file>"
 echo ""
-echo "To run the enhanced debugging scraper, use:"
-echo "  python workday_scraper_enhanced.py -f <config_file>"
-echo ""
-echo "To test the scraper components, use:"
-echo "  python test_scraper.py"
-echo ""
-echo "For more information, see README.md and enhanced_scraper_README.md"
+echo "For more information, see README.md"
