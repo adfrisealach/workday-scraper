@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  workday-scraper:
+    # Use your DockerHub image or the one provided below (replace username with your DockerHub username)
+    image: ${DOCKER_USERNAME:-username}/workday-scraper:${TAG:-latest}
+    container_name: workday-scraper
+    restart: unless-stopped
+    environment:
+      # Telegram Configuration (required)
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      
+      # Database & Logging Configuration
+      - DB_FILE=/app/data/workday_jobs.db
+      - LOG_FILE=/app/logs/workday_scraper.log
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Scraper Configuration 
+      - CONFIG_FILE=${CONFIG_FILE:-autodesk.txt}
+      
+      # Timezone (set to your server timezone)
+      - TZ=${TZ:-America/Los_Angeles}
+    
+    volumes:
+      # Ensure these directories exist on your host
+      - ${DATA_PATH:-/portainer/workday-scraper/data}:/app/data
+      - ${CONFIGS_PATH:-/portainer/workday-scraper/configs}:/app/configs
+      - ${LOGS_PATH:-/portainer/workday-scraper/logs}:/app/logs
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/data/workday_jobs.db') else 1)"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+      
+    # Resource limits (optional - adjust based on your server)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          memory: 128M
+
+networks:
+  default:
+    driver: bridge
+
+# PORTAINER DEPLOYMENT NOTES:
+# 
+# Before deploying this stack in Portainer:
+# 
+# 1. Create the necessary directories on your host:
+#    mkdir -p /portainer/workday-scraper/data
+#    mkdir -p /portainer/workday-scraper/configs
+#    mkdir -p /portainer/workday-scraper/logs
+# 
+# 2. Add configuration files to the configs directory:
+#    cp your_config.txt /portainer/workday-scraper/configs/
+# 
+# 3. When creating the stack in Portainer, set these environment variables:
+#    TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+#    TELEGRAM_CHAT_ID=your_telegram_chat_id
+#    DOCKER_USERNAME=your_dockerhub_username
+#    
+#    Optional environment variables:
+#    CONFIG_FILE=name_of_your_config_file.txt (default: autodesk.txt)
+#    TZ=Your_Timezone (default: America/Los_Angeles)
+#    LOG_LEVEL=INFO
+#    
+#    Advanced path customization (if needed):
+#    DATA_PATH=/custom/path/to/data
+#    CONFIGS_PATH=/custom/path/to/configs
+#    LOGS_PATH=/custom/path/to/logs
+#
+# 4. IMPORTANT: If you're deploying on a different architecture than where the image was built
+#    (e.g., building on Apple Silicon Mac and deploying to x86 Ubuntu server), use the 
+#    platform option in your DockerHub build:
+#    docker buildx build --platform linux/amd64 -t username/workday-scraper:latest .

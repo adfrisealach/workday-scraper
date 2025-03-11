@@ -11,10 +11,12 @@ import json
 import logging
 import asyncio
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 from .logging_utils import get_logger, configure_logger
 from .jsonld_extractor import scrape_workday_jobs
+from .db_manager import DatabaseManager
+# Import for Telegram bot - initialized later to avoid circular imports
 
 logger = get_logger()
 
@@ -24,7 +26,7 @@ class WorkdayScraper:
     """Main controller for the Workday Scraper using JSON-LD extraction."""
     
     def __init__(self, config_file=None, initial=False, concurrency=10,
-                log_file=None, log_level="INFO"):
+                log_file=None, log_level="INFO", db_file="workday_jobs.db"):
         """Initialize the WorkdayScraper.
         
         Args:
@@ -33,6 +35,7 @@ class WorkdayScraper:
             concurrency (int): Maximum number of concurrent HTTP requests.
             log_file (str, optional): Path to the log file.
             log_level (str): Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+            db_file (str): Path to the SQLite database file.
         """
         # Configure logging
         numeric_level = getattr(logging, log_level.upper(), None)
@@ -46,6 +49,9 @@ class WorkdayScraper:
         self.initial = initial
         self.concurrency = concurrency
         
+        # Initialize database manager
+        self.db_manager = DatabaseManager(db_file=db_file)
+        
         # Initialize job IDs dictionary
         self.job_ids_dict = {}
         self.load_job_ids()
@@ -58,7 +64,8 @@ class WorkdayScraper:
         logger.info("Initialized WorkdayScraper with JSON-LD extraction", extra={
             "initial": initial,
             "concurrency": concurrency,
-            "config_file": config_file
+            "config_file": config_file,
+            "db_file": db_file
         })
     def load_config(self, config_file):
         """Load company URLs from a config file.
@@ -94,29 +101,52 @@ class WorkdayScraper:
             raise
     
     def load_job_ids(self):
-        """Load job IDs from the JSON file."""
+        """Load job IDs from the database and/or JSON file."""
         try:
+            # First try to load from the database
+            db_job_ids = self.db_manager.get_job_ids_by_company()
+            
+            if db_job_ids:
+                logger.info(f"Loaded job IDs from database with {len(db_job_ids)} companies")
+                self.job_ids_dict = db_job_ids
+            else:
+                logger.info("No job IDs found in database")
+                self.job_ids_dict = {}
+            
+            # For backward compatibility, also check the JSON file
             if os.path.exists("job_ids.json"):
                 with open("job_ids.json", "r") as f:
-                    self.job_ids_dict = json.load(f)
+                    json_job_ids = json.load(f)
                 
-                logger.info(f"Loaded job IDs dictionary with {len(self.job_ids_dict)} companies")
-            else:
-                logger.info("No existing job IDs dictionary found, creating a new one")
+                logger.info(f"Loaded job IDs from JSON file with {len(json_job_ids)} companies")
+                
+                # Merge the two sources
+                for company, job_ids in json_job_ids.items():
+                    if company not in self.job_ids_dict:
+                        self.job_ids_dict[company] = []
+                    
+                    # Add any job IDs that aren't already in the database
+                    for job_id in job_ids:
+                        if job_id not in self.job_ids_dict[company]:
+                            self.job_ids_dict[company].append(job_id)
+            
+            if not self.job_ids_dict:
+                logger.info("No existing job IDs found, creating a new dictionary")
                 self.job_ids_dict = {}
+                
         except Exception as e:
             logger.error(f"Error loading job IDs: {str(e)}")
             self.job_ids_dict = {}
     
     def save_job_ids(self):
-        """Save job IDs to the JSON file."""
+        """Save job IDs to the JSON file for backward compatibility."""
         try:
             with open("job_ids.json", "w") as f:
                 json.dump(self.job_ids_dict, f)
             
-            logger.info(f"Saved job IDs dictionary with {len(self.job_ids_dict)} companies")
+            logger.info(f"Saved job IDs dictionary with {len(self.job_ids_dict)} companies to JSON file")
         except Exception as e:
-            logger.error(f"Error saving job IDs dictionary: {str(e)}")
+            logger.error(f"Error saving job IDs dictionary to JSON file: {str(e)}")
     
     async def scrape_company(self, company_name, company_url):
         """Scrape job listings for a company using JSON-LD extraction.
@@ -213,8 +243,8 @@ class WorkdayScraper:
         logger.info(f"Successfully scraped {len(all_jobs)} total jobs")
         return all_jobs
     
-    def save_results(self, jobs, output_json=True, output_rss=True):
-        """Save the scraped jobs to output files.
+    def save_results(self, jobs, output_json=False, output_rss=False):
+        """Save the scraped jobs to the database and optionally to output files.
         
         Args:
             jobs (list): Scraped job information.
@@ -225,7 +255,14 @@ class WorkdayScraper:
             logger.warning("No jobs to save")
             return
         
-        # Save to JSON
+        # Save to database
+        try:
+            saved, failed = self.db_manager.save_jobs(jobs)
+            logger.info(f"Saved {saved} jobs to database, {failed} failed")
+        except Exception as e:
+            logger.error(f"Error saving to database: {str(e)}")
+        
+        # Save to JSON if requested
         if output_json:
             try:
                 jsondata = json.dumps(jobs, indent=2)
@@ -235,7 +272,7 @@ class WorkdayScraper:
             except Exception as e:
                 logger.error(f"Error saving JSON: {str(e)}")
         
-        # Save to RSS
+        # Save to RSS if requested
         if output_rss:
             try:
                 # Generate RSS feed
@@ -275,7 +312,7 @@ class WorkdayScraper:
             except Exception as e:
                 logger.error(f"Error saving RSS: {str(e)}")
         
-        # Save job IDs
+        # Save job IDs for backward compatibility
         self.save_job_ids()
     
     def send_email_notification(self, jobs, sender, recipients, password):
@@ -364,11 +401,12 @@ async def run_scraper(args):
     # Extract arguments
     config_file = args["file"]
     initial = args["initial"]
-    no_json = args.get("no-json", False)
-    no_rss = args.get("no-rss", False)
+    output_json = args.get("json", False)
+    output_rss = args.get("rss", False)
     concurrency = args.get("max_workers", 10)  # Use max_workers as concurrency
     log_file = args.get("log_file", "workday_scraper.log")
     log_level = args.get("log_level", "INFO")
+    db_file = args.get("db_file", "workday_jobs.db")
     
     # Email arguments
     sender = args.get("email")
@@ -382,22 +420,46 @@ async def run_scraper(args):
         initial=initial,
         concurrency=concurrency,
         log_file=log_file,
-        log_level=log_level
+        log_level=log_level,
+        db_file=db_file
     )
+    
+    # Initialize the Telegram bot if environment variables are set
+    telegram_bot = None
+    if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+        try:
+            # Import here to avoid circular imports
+            from .telegram_bot import initialize_bot
+            # Initialize the bot with the same database manager as the scraper
+            telegram_bot = await initialize_bot(scraper.db_manager)
+            logger.info("Telegram bot initialized for notifications")
+        except Exception as e:
+            logger.error(f"Error initializing Telegram bot: {str(e)}")
+            telegram_bot = None
     
     try:
         # Scrape all companies
         jobs = await scraper.scrape_all_companies()
         
         # Save results
-        scraper.save_results(jobs, output_json=not no_json, output_rss=not no_rss)
+        scraper.save_results(jobs, output_json=output_json, output_rss=output_rss)
         
         # Send email notification if requested
         if sender and recipients and password and jobs:
             scraper.send_email_notification(jobs, sender, recipients, password)
         
+        # Send Telegram notification if bot is initialized and jobs were found
+        if telegram_bot and jobs:
+            try:
+                logger.info("Sending Telegram notification")
+                await telegram_bot.send_notification(jobs)
+            except Exception as e:
+                logger.error(f"Error sending Telegram notification: {str(e)}")
+        
         return jobs
     finally:
         # Clean up resources
         scraper.cleanup()
+        # Close database connection
+        scraper.db_manager.close()
 
