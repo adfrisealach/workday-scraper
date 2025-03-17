@@ -1,0 +1,60 @@
+workday-scraper/
+├── .dockerignore             # Files to exclude from Docker builds
+├── .gitignore                # Files to exclude from Git
+├── README.md                 # Project overview and documentation
+├── requirements.txt          # Python dependencies
+│
+├── analysis/                 # Data analysis scripts and notebooks
+│   ├── job_data_analysis.ipynb  # Jupyter notebook for analyzing job data
+│   └── location_field_parsing.py  # Script for parsing location fields
+│
+├── config/                   # Configuration files
+│   ├── .env.docker           # Environment variables for Docker
+│   ├── .env.sample           # Sample environment variables
+│   └── .env.test             # Environment variables for testing
+│
+├── configs/                  # Scraper configuration files
+│   └── autodesk.txt          # Configuration for Autodesk jobs
+│
+├── data/                     # Data storage
+│   └── workday_jobs.db       # SQLite database for job data
+│
+├── docker/                   # Docker-related files
+│   ├── Dockerfile            # Docker image definition
+│   ├── docker-compose.portainer.yml  # Docker Compose for Portainer
+│   ├── docker-compose.pull.yml       # Docker Compose for pulling images
+│   ├── docker-compose.yml            # Main Docker Compose file
+│   ├── docker-setup.sh               # Script for setting up Docker
+│   └── entrypoint.sh                 # Docker container entrypoint script
+│
+├── docs/                     # Documentation
+│   ├── DOCKER.md             # Docker implementation guide
+│   ├── IMPLEMENTATION.md     # Implementation details
+│   ├── PORTAINER-DEPLOYMENT.md  # Portainer deployment guide
+│   ├── README.md             # Documentation overview
+│   ├── cleanup_recommendations.md  # Cleanup recommendations
+│   └── repo_structure.txt    # This file - repository structure
+│
+├── logs/                     # Log files
+│
+├── scripts/                  # Utility scripts
+│   ├── export_to_csv.py      # Script for exporting data to CSV
+│   ├── run_telegram_bot.py   # Script for running the Telegram bot
+│   ├── setup_environment.sh  # Script for setting up the environment
+│   ├── test_bot.sh           # Script for testing the bot
+│   └── test_telegram_bot.py  # Script for testing the Telegram bot
+│
+└── workday_scraper/          # Main package
+    ├── __init__.py           # Package initialization
+    ├── __main__.py           # Entry point for running as a module
+    ├── db_manager.py         # Database management
+    ├── email_funcs.py        # Email functionality
+    ├── error_handling.py     # Error handling utilities
+    ├── export_utils.py       # Export utilities
+    ├── jsonld_extractor.py   # JSON-LD extraction for job data
+    ├── logging_utils.py      # Logging utilities
+    ├── parse_args.py         # Command-line argument parsing
+    ├── rss_funcs.py          # RSS feed functionality
+    ├── scheduler.py          # Job scheduling
+    ├── scraper_controller.py # Main scraper controller
+    └── telegram_bot.py       # Telegram bot functionality

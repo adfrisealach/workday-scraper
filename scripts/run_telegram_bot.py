@@ -21,15 +21,15 @@ async def main():
     """Main entry point for the standalone Telegram bot."""
     parser = ArgumentParser(description="Workday Scraper Telegram Bot")
     parser.add_argument(
-        "-db", "--db-file", 
-        dest="db_file", 
+        "-db", "--db-file",
+        dest="db_file",
         type=str,
         default="workday_jobs.db",
         help="Path to the SQLite database file (default: workday_jobs.db)"
     )
     parser.add_argument(
-        "-l", "--log-file", 
-        dest="log_file", 
+        "-l", "--log-file",
+        dest="log_file",
         type=str,
         default="telegram_bot.log",
         help="Path to the log file (default: telegram_bot.log)"
@@ -69,7 +69,7 @@ async def main():
     # Check for required environment variables
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    config_dir = os.environ.get("CONFIG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs"))
+    config_dir = os.environ.get("CONFIG_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs"))
     
     if not token:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is not set")

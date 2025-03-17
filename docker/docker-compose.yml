@@ -1,21 +1,18 @@
-version: '3.8'
-
 services:
   workday-scraper:
-    build:
-      context: .
-      dockerfile: Dockerfile
     container_name: workday-scraper
     restart: unless-stopped
     environment:
+      # Telegram Configuration (required)
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      
       # Database & Logging Configuration
       - DB_FILE=/app/data/workday_jobs.db
       - LOG_FILE=/app/logs/workday_scraper.log
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       
-      # Scraper Configuration
+      # Scraper Configuration 
       - CONFIG_FILE=${CONFIG_FILE:-autodesk.txt}
       
       # Timezone (set to your server timezone)

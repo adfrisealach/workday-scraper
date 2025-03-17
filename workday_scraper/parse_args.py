@@ -71,7 +71,7 @@ def parse_args():
     # Logging options
     parser.add_argument("-l", "--log-file", dest="log_file", type=str,
                       default="workday_scraper.log",
-                      help="Path to the log file")
+                      help="Path to the log file (default: workday_scraper.log)")
     
     parser.add_argument("-ll", "--log-level", dest="log_level", type=str,
                       default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],

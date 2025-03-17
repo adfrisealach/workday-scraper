@@ -39,8 +39,12 @@ logs/
 *.log
 
 # Docker files (not needed inside the container)
-Dockerfile
-docker-compose.yml
+docker/Dockerfile
+docker/docker-compose.yml
+docker/docker-compose.pull.yml
+docker/docker-compose.portainer.yml
+docker/docker-setup.sh
+docker/dockerhub-deploy.sh
 .dockerignore
 
 # Editor settings
@@ -51,11 +55,15 @@ docker-compose.yml
 
 # Environment
 .env
-.env.sample
+config/.env.sample
+config/.env.docker
+config/.env.test
 
-# Jupyter Notebook
+# Jupyter Notebook and Analysis
 .ipynb_checkpoints
 *.ipynb
+analysis/
 
-# Other
+# Documentation and other files
+docs/
 .DS_Store

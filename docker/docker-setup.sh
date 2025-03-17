@@ -25,7 +25,7 @@ if ! command -v docker-compose &> /dev/null; then
 fi
 
 # Check if required files exist
-required_files=("Dockerfile" "docker-compose.yml" "entrypoint.sh")
+required_files=("docker/Dockerfile" "docker/docker-compose.yml" "docker/entrypoint.sh")
 missing_files=()
 
 for file in "${required_files[@]}"; do
@@ -49,12 +49,12 @@ mkdir -p data configs logs
 # Check if .env file exists, create if not
 if [ ! -f ".env" ]; then
     echo -e "${YELLOW}No .env file found. Creating from template...${NC}"
-    if [ -f ".env.docker" ]; then
-        cp .env.docker .env
-        echo -e "${GREEN}Created .env file from .env.docker template.${NC}"
+    if [ -f "config/.env.docker" ]; then
+        cp config/.env.docker .env
+        echo -e "${GREEN}Created .env file from config/.env.docker template.${NC}"
         echo -e "${YELLOW}Please edit the .env file with your Telegram bot token and chat ID.${NC}"
     else
-        echo -e "${RED}Error: .env.docker template not found.${NC}"
+        echo -e "${RED}Error: config/.env.docker template not found.${NC}"
         exit 1
     fi
 fi
@@ -69,7 +69,7 @@ fi
 
 # Function to check for exec format errors in container logs
 check_for_format_errors() {
-    if docker-compose logs | grep -q "exec format error"; then
+    if docker-compose -f docker/docker-compose.yml logs | grep -q "exec format error"; then
         echo -e "${RED}Format errors detected in container logs.${NC}"
         echo "This usually happens when the entrypoint script has Windows line endings or architecture mismatch."
         echo "The Dockerfile has been updated to fix these issues."
@@ -96,11 +96,11 @@ while true; do
     case $choice in
         1)
             echo -e "${GREEN}Building Docker image...${NC}"
-            docker-compose build
+            docker-compose -f docker/docker-compose.yml build
             ;;
         2)
             echo -e "${GREEN}Starting container...${NC}"
-            docker-compose up -d
+            docker-compose -f docker/docker-compose.yml up -d
             echo -e "${GREEN}Container started in detached mode.${NC}"
             # Wait a moment for the container to start
             sleep 3
@@ -109,24 +109,24 @@ while true; do
             ;;
         3)
             echo -e "${GREEN}Stopping container...${NC}"
-            docker-compose down
+            docker-compose -f docker/docker-compose.yml down
             ;;
         4)
             echo -e "${GREEN}Showing container logs (press Ctrl+C to exit)...${NC}"
-            docker-compose logs -f
+            docker-compose -f docker/docker-compose.yml logs -f
             ;;
         5)
             echo -e "${GREEN}Container status:${NC}"
-            docker-compose ps
+            docker-compose -f docker/docker-compose.yml ps
             ;;
         6)
             echo -e "${GREEN}Force rebuilding Docker image to fix format issues...${NC}"
             # First stop any running containers
-            docker-compose down
+            docker-compose -f docker/docker-compose.yml down
             # Clean up previous build cache
-            docker-compose build --no-cache
+            docker-compose -f docker/docker-compose.yml build --no-cache
             echo -e "${GREEN}Rebuild complete. Starting container...${NC}"
-            docker-compose up -d
+            docker-compose -f docker/docker-compose.yml up -d
             echo -e "${GREEN}Container started in detached mode.${NC}"
             # Wait a moment for the container to start
             sleep 3

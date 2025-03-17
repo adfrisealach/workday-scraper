@@ -394,14 +394,40 @@ async def extract_job_details_from_jsonld(job_urls: List[str], concurrency: int 
     
     logger.info(f"Extracting job details from {len(job_urls)} URLs with concurrency {concurrency}")
     
+    # Add a progress counter
+    processed_count = 0
+    total_count = len(job_urls)
+    
     async def fetch_and_extract(url: str, retry_count: int = 0) -> Dict[str, Any]:
+        nonlocal processed_count
+        try:
+            # Add a timeout for the entire function
+            result = await asyncio.wait_for(_fetch_and_extract(url, retry_count), timeout=30.0)
+            
+            # Update progress counter
+            processed_count += 1
+            if processed_count % 10 == 0 or processed_count == total_count:
+                logger.info(f"Progress: {processed_count}/{total_count} URLs processed ({processed_count/total_count*100:.1f}%)")
+            
+            return result
+        except asyncio.TimeoutError:
+            logger.error(f"Fetch and extract timed out for {url}")
+            
+            # Update progress counter even for timeouts
+            processed_count += 1
+            if processed_count % 10 == 0 or processed_count == total_count:
+                logger.info(f"Progress: {processed_count}/{total_count} URLs processed ({processed_count/total_count*100:.1f}%)")
+            
+            return {'url': url, 'error': 'Timeout'}
+    
+    async def _fetch_and_extract(url: str, retry_count: int = 0) -> Dict[str, Any]:
         async with semaphore:
             try:
                 # Add jitter to avoid rate limiting - increase the delay
                 await asyncio.sleep(random.uniform(0.5, 1.0))
                 
                 # Reduce timeout to avoid hanging requests
-                async with httpx.AsyncClient(timeout=20.0) as client:
+                async with httpx.AsyncClient(timeout=10.0) as client:
                     headers = {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -454,15 +480,34 @@ async def extract_job_details_from_jsonld(job_urls: List[str], concurrency: int 
                     backoff_time = 2 ** retry_count
                     logger.debug(f"Retrying {url} after {backoff_time}s (attempt {retry_count+1}/{max_retries})")
                     await asyncio.sleep(backoff_time)
-                    return await fetch_and_extract(url, retry_count + 1)
+                    return await _fetch_and_extract(url, retry_count + 1)
                 else:
                     logger.error(f"Failed to extract job details from {url}: {str(e)}")
                     failed_urls.append(url)
                     return {'url': url, 'error': str(e)}
     
-    # Process all URLs concurrently
-    tasks = [fetch_and_extract(url) for url in job_urls]
-    all_results = await asyncio.gather(*tasks)
+    # Process URLs in batches to avoid memory issues
+    batch_size = 50  # Process 50 URLs at a time
+    all_results = []
+    
+    for i in range(0, len(job_urls), batch_size):
+        batch = job_urls[i:i+batch_size]
+        logger.info(f"Processing batch {i//batch_size + 1}/{(len(job_urls) + batch_size - 1)//batch_size} ({len(batch)} URLs)")
+        
+        # Process batch concurrently with a timeout
+        tasks = [fetch_and_extract(url) for url in batch]
+        try:
+            # Add a timeout for the batch (5 minutes per batch)
+            batch_results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=300)
+            all_results.extend(batch_results)
+            logger.info(f"Completed batch {i//batch_size + 1} with {len(batch_results)} results")
+        except asyncio.TimeoutError:
+            logger.error(f"Batch {i//batch_size + 1} timed out after 5 minutes")
+            # Get results from completed tasks
+            completed_tasks = [task for task in tasks if task.done()]
+            batch_results = [task.result() for task in completed_tasks if not task.exception()]
+            all_results.extend(batch_results)
+            logger.info(f"Retrieved {len(batch_results)} results from completed tasks in batch before timeout")
     
     # Filter out errors
     valid_results = [job for job in all_results if 'error' not in job]

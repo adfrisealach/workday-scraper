@@ -88,10 +88,10 @@ COPY . .
 
 # Ensure entrypoint script has correct line endings and is executable
 RUN ls -la && \
-    cat entrypoint.sh | head -1 && \
-    dos2unix entrypoint.sh && \
-    chmod +x entrypoint.sh && \
-    ls -la entrypoint.sh
+    cat docker/entrypoint.sh | head -1 && \
+    dos2unix docker/entrypoint.sh && \
+    chmod +x docker/entrypoint.sh && \
+    ls -la docker/entrypoint.sh
 # Set up Chrome sandbox and capabilities
 RUN mkdir -p /tmp/.chrome-sandbox && \
     chown root:root /tmp/.chrome-sandbox && \
@@ -100,5 +100,4 @@ RUN mkdir -p /tmp/.chrome-sandbox && \
     setcap cap_net_raw,cap_net_admin,cap_net_bind_service=+ep /ms-playwright/.placeholder
 
 # Set entrypoint
-ENTRYPOINT ["/bin/bash", "/app/entrypoint.sh"]
-ENTRYPOINT ["/bin/bash", "/app/entrypoint.sh"]
+ENTRYPOINT ["/bin/bash", "/app/docker/entrypoint.sh"]

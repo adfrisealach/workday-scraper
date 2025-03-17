@@ -21,9 +21,13 @@ Ensure your Docker image is available either:
 - In a private DockerHub repository you have access to
 - In a local registry accessible to your Portainer instance
 
-You can build and push the image using the provided `dockerhub-deploy.sh` script:
+You can build and push the image using standard Docker commands:
 ```bash
-./dockerhub-deploy.sh
+# Build the image
+docker build -t username/workday-scraper:latest -f docker/Dockerfile .
+
+# Push to Docker Hub
+docker push username/workday-scraper:latest
 ```
 
 ### 2. Prepare Host Directories
@@ -45,7 +49,7 @@ cp your_config.txt /portainer/workday-scraper/configs/
 1. Log in to your Portainer instance
 2. Navigate to Stacks → Add stack
 3. Give your stack a name (e.g., "workday-scraper")
-4. In the "Web editor" tab, paste the contents of `docker-compose.portainer.yml`
+4. In the "Web editor" tab, paste the contents of `docker/docker-compose.portainer.yml`
 5. Configure environment variables in the "Environment variables" section:
 
    **Required variables:**
@@ -104,7 +108,7 @@ You can monitor resource usage in the Portainer dashboard. The stack is configur
 - CPU: 0.5 cores (50% of a CPU core)
 - Memory: 512MB maximum, 128MB reserved
 
-You can adjust these values in the `docker-compose.portainer.yml` file before deployment or update them later.
+You can adjust these values in the `docker/docker-compose.portainer.yml` file before deployment or update them later.
 
 ### Backup Strategy
 

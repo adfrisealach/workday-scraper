@@ -13,6 +13,7 @@ import sqlite3
 import logging
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
+from .status_tracking import JobStatusManager
 from pathlib import Path
 
 from .logging_utils import get_logger
@@ -35,9 +36,11 @@ class DatabaseManager:
         self.backup_file = f"{self.db_file}.bak"
         self.conn = None
         self.cursor = None
+        self.status_manager = None
         
         logger.info(f"Initializing DatabaseManager with file: {self.db_file}")
         self._initialize_db()
+        self.status_manager = JobStatusManager(self)
 
     def _check_file_permissions(self):
         """Check and log file permissions and ownership."""
@@ -265,16 +268,36 @@ class DatabaseManager:
                     url TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    status TEXT DEFAULT 'active',
+                    last_seen TEXT,
+                    missed_scrapes INTEGER DEFAULT 0,
                     FOREIGN KEY (company_id) REFERENCES companies (id),
                     UNIQUE (job_id, company_id)
                 )
             """)
             
-            # Create index on job_id for faster lookups
-            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_job_id ON jobs (job_id)")
+            # Create job status history table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS job_status_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER,
+                    status TEXT NOT NULL,
+                    changed_at TEXT NOT NULL,
+                    reason TEXT,
+                    FOREIGN KEY (job_id) REFERENCES jobs (id)
+                )
+            """)
             
-            # Create index on company_id for faster joins
+            # Create indexes for jobs table
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_job_id ON jobs (job_id)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_company_id ON jobs (company_id)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON jobs (status)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_last_seen ON jobs (last_seen)")
+            
+            # Create indexes for status history table
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_job_id ON job_status_history (job_id)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_status ON job_status_history (status)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_changed_at ON job_status_history (changed_at)")
             
             self.conn.commit()
             logger.info("Database tables created successfully")
@@ -324,7 +347,7 @@ class DatabaseManager:
             raise
     
     def save_job(self, job_data: Dict[str, Any], company_id: int) -> bool:
-        """Save a job to the database.
+        """Save a job to the database and handle its status.
         
         Args:
             job_data (dict): Job data dictionary.
@@ -339,24 +362,37 @@ class DatabaseManager:
                 logger.warning("Job data missing job_id, skipping")
                 return False
             
-            # Check if the job already exists
-            self.cursor.execute(
-                "SELECT id FROM jobs WHERE job_id = ? AND company_id = ?",
-                (job_id, company_id)
-            )
+            now = datetime.now().isoformat()
+            
+            # Check if the job exists and get its status
+            self.cursor.execute("""
+                SELECT id, status
+                FROM jobs
+                WHERE job_id = ? AND company_id = ?
+            """, (job_id, company_id))
             result = self.cursor.fetchone()
             
             if result:
-                logger.debug(f"Job {job_id} already exists in the database")
+                job_db_id = result['id']
+                current_status = result['status']
+                
+                # If job was closed but is now active again, reactivate it
+                if current_status == 'closed':
+                    self.status_manager.reactivate_job(job_db_id)
+                    logger.info(f"Reactivated job {job_id}")
+                
+                # Update last seen timestamp
+                self.status_manager.update_job_last_seen(job_id, company_id)
+                logger.debug(f"Updated last seen for job {job_id}")
                 return True
             
-            # Insert the job
-            now = datetime.now().isoformat()
+            # Insert new job
             self.cursor.execute("""
                 INSERT INTO jobs (
                     job_id, title, description, date_posted, employment_type,
-                    location, company_id, url, timestamp, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    location, company_id, url, timestamp, created_at,
+                    status, last_seen, missed_scrapes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_id,
                 job_data.get('title', ''),
@@ -367,19 +403,31 @@ class DatabaseManager:
                 company_id,
                 job_data.get('url', ''),
                 job_data.get('timestamp', now),
-                now
+                now,
+                'active',  # Initial status
+                now,      # Initial last_seen
+                0        # Initial missed_scrapes
             ))
             self.conn.commit()
             
-            logger.debug(f"Saved job {job_id} to database")
+            # Add initial status history entry
+            job_db_id = self.cursor.lastrowid
+            self.status_manager.update_job_status(
+                job_db_id,
+                'active',
+                'Initial posting'
+            )
+            
+            logger.debug(f"Saved new job {job_id} to database")
             return True
+            
         except Exception as e:
             logger.error(f"Error saving job {job_data.get('job_id', 'unknown')}: {str(e)}")
             self.conn.rollback()
             return False
     
     def save_jobs(self, jobs: List[Dict[str, Any]]) -> Tuple[int, int]:
-        """Save multiple jobs to the database.
+        """Save multiple jobs to the database and update their status.
         
         Args:
             jobs (list): List of job data dictionaries.
@@ -390,28 +438,53 @@ class DatabaseManager:
         saved = 0
         failed = 0
         
+        # Group jobs by company
+        jobs_by_company = {}
         for job in jobs:
             company_name = job.get('company', '')
             if not company_name:
                 logger.warning("Job data missing company name, skipping")
                 failed += 1
                 continue
-            
+            if company_name not in jobs_by_company:
+                jobs_by_company[company_name] = []
+            jobs_by_company[company_name].append(job)
+        
+        # Process each company's jobs
+        for company_name, company_jobs in jobs_by_company.items():
             try:
                 # Get or create the company
                 company_id = self.get_or_create_company(
                     name=company_name,
-                    url=job.get('company_url', '')
+                    url=company_jobs[0].get('company_url', '')
                 )
                 
-                # Save the job
-                if self.save_job(job, company_id):
-                    saved += 1
-                else:
-                    failed += 1
+                # Mark all active jobs as missed for this company
+                self.status_manager.mark_company_jobs_as_missed(company_id)
+                
+                # Save each job
+                for job in company_jobs:
+                    try:
+                        result = self.save_job(job, company_id)
+                        if result:
+                            saved += 1
+                            job_id = job['job_id']
+                            # Update last seen timestamp for existing jobs
+                            self.status_manager.update_job_last_seen(job_id, company_id)
+                            logger.info(f"Updated job {job_id} status and last seen timestamp")
+                        else:
+                            failed += 1
+                            logger.warning(f"Failed to save/update job {job.get('job_id', 'unknown')}")
+                    except Exception as e:
+                        logger.error(f"Error saving job for company {company_name}: {str(e)}")
+                        failed += 1
+                
+                # Mark jobs that weren't seen as closed
+                self.status_manager.mark_stale_jobs_as_closed(company_id)
+                
             except Exception as e:
-                logger.error(f"Error saving job for company {company_name}: {str(e)}")
-                failed += 1
+                logger.error(f"Error processing jobs for company {company_name}: {str(e)}")
+                failed += len(company_jobs)
         
         logger.info(f"Saved {saved} jobs to database, {failed} failed")
         return saved, failed
