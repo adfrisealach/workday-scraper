@@ -48,6 +48,12 @@ class TelegramBot:
         # Initialize database manager if not provided
         self.db_manager = db_manager or DatabaseManager()
         
+        # Get config directory from environment or default to /app/configs for Docker
+        self.config_dir = os.environ.get("CONFIG_DIR", "/app/configs")
+        logger.info(f"Using config directory: {self.config_dir}")
+        if not os.path.exists(self.config_dir):
+            logger.error(f"Config directory not found: {self.config_dir}")
+        
         # Store running scrape jobs
         self.running_jobs = {}
         # Store job title mappings for search feature
@@ -500,9 +506,10 @@ class TelegramBot:
         options = context.args[1:] if len(context.args) > 1 else []
         
         # Check if the config file exists
-        if not os.path.exists(os.path.join("configs", config_file)):
+        config_path = os.path.join(self.config_dir, config_file)
+        if not os.path.exists(config_path):
             await update.message.reply_text(
-                f"Config file '{config_file}' not found in the configs directory.\n"
+                f"Config file '{config_file}' not found in {self.config_dir}.\n"
                 "Use `/list_configs` to see available config files."
             )
             return
@@ -543,12 +550,11 @@ class TelegramBot:
         """
         try:
             # List config files
-            configs_dir = "configs"
-            if not os.path.exists(configs_dir):
-                await update.message.reply_text("Configs directory not found.")
+            if not os.path.exists(self.config_dir):
+                await update.message.reply_text(f"Config directory {self.config_dir} not found.")
                 return
             
-            config_files = [f for f in os.listdir(configs_dir) if f.endswith(".txt")]
+            config_files = [f for f in os.listdir(self.config_dir) if f.endswith(".txt")]
             
             if not config_files:
                 await update.message.reply_text("No config files found.")
@@ -639,6 +645,10 @@ class TelegramBot:
             logger.error("Received update without message for set_schedule command")
             return
             
+        # Log the raw message for debugging
+        logger.info(f"Received set_schedule command. Raw message text: {update.message.text}")
+        logger.info(f"Message entities: {update.message.entities}")
+            
         if not context.args or len(context.args) < 2:
             await update.message.reply_text(
                 "Please provide hour and minute.\n"
@@ -649,9 +659,25 @@ class TelegramBot:
             return
             
         try:
+            # Log the raw arguments
+            logger.info(f"Processing schedule arguments: {context.args}")
+            
+            # Log each argument's format
+            for i, arg in enumerate(context.args):
+                logger.info(f"Argument {i} type: {type(arg)}, value: {arg}, length: {len(arg)}")
+            
+            # Parse hour and minute with validation
             hour = int(context.args[0])
+            logger.info(f"Parsed hour: {hour}")
+            
             minute = int(context.args[1])
-            timezone = context.args[2] if len(context.args) > 2 else None
+            logger.info(f"Parsed minute: {minute}")
+            
+            # Handle timezone with careful parsing
+            timezone = None
+            if len(context.args) > 2:
+                timezone = context.args[2]
+                logger.info(f"Using timezone: {timezone}")
             
             if not (0 <= hour <= 23):
                 await update.message.reply_text("Hour must be between 0 and 23")
@@ -663,14 +689,23 @@ class TelegramBot:
             
             schedule = self.scheduler.update_schedule(hour=hour, minute=minute, timezone=timezone)
             
-            # Format the response message
-            message = "✅ *Schedule Updated*\n\n"
-            message += f"• Hour: {schedule['hour']}\n"
-            message += f"• Minute: {schedule['minute']}\n"
-            message += f"• Timezone: {schedule['timezone']}\n"
-            message += f"• Next Run: {schedule['next_run']}"
-            
-            await update.message.reply_text(message, parse_mode="Markdown")
+            try:
+                # Format the response message carefully escaping special characters
+                message = "✅ Schedule Updated\n\n"
+                message += f"• Hour: {schedule['hour']}\n"
+                message += f"• Minute: {schedule['minute']}\n"
+                message += f"• Timezone: {schedule['timezone']}\n"
+                message += f"• Next Run: {schedule['next_run']}"
+                
+                logger.info(f"Sending response message: {message}")
+                
+                # Send without Markdown parsing first to test
+                await update.message.reply_text(message)
+                
+            except Exception as e:
+                logger.error(f"Error sending schedule response: {str(e)}", exc_info=True)
+                # Fallback to plain text if formatting fails
+                await update.message.reply_text(f"Schedule updated: {schedule['hour']}:{schedule['minute']} {schedule['timezone']}")
             
         except ValueError as e:
             await update.message.reply_text(f"Error: {str(e)}")
@@ -929,7 +964,40 @@ class TelegramBot:
             
             # Build the command to run the scraper
             config_file = args.get("file")
-            cmd_parts = [sys.executable, "-m", "workday_scraper", "-f", config_file]
+            # Log scraper configuration
+            config_path = os.path.join(self.config_dir, config_file)
+            logger.info(f"Starting scrape with config from: {config_path}")
+            
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    logger.info(f"Config file contents:\n{f.read()}")
+            else:
+                logger.error(f"Config file not found at: {config_path}")
+                await update.message.reply_text(f"Error: Config file not found at {config_path}")
+                return
+            
+            # Use full path to config file
+            config_path = os.path.join(self.config_dir, config_file)
+            
+            # Get database and log file paths from environment variables
+            db_file = os.environ.get('DB_FILE', '/app/data/workday_jobs.db')
+            log_file = os.environ.get('LOG_FILE', '/app/logs/workday_scraper.log')
+            
+            # Build command with explicit paths
+            cmd_parts = [
+                sys.executable,
+                "-m",
+                "workday_scraper",
+                "-f", config_path,
+                "-db", db_file,
+                "-l", log_file
+            ]
+            
+            # Log command configuration
+            logger.info(f"Python executable: {sys.executable}")
+            logger.info(f"Working directory: {os.getcwd()}")
+            logger.info(f"Database file: {db_file}")
+            logger.info(f"Log file: {log_file}")
             
             # Add optional arguments
             if args.get("initial"):
@@ -939,15 +1007,70 @@ class TelegramBot:
             if args.get("rss"):
                 cmd_parts.append("-rs")
             
-            # Run the command as a subprocess
+            logger.info(f"Running command: {' '.join(cmd_parts)}")
+            # Run the command with verbose output
+            logger.info(f"Running command: {' '.join(cmd_parts)}")
+            
+            # Ensure all necessary environment variables are explicitly passed
+            env_vars = {
+                **os.environ,
+                'PYTHONUNBUFFERED': '1',
+                'LOG_LEVEL': 'DEBUG',
+                'DB_FILE': os.environ.get('DB_FILE', '/app/data/workday_jobs.db'),
+                'LOG_FILE': os.environ.get('LOG_FILE', '/app/logs/workday_scraper.log'),
+                'PLAYWRIGHT_BROWSERS_PATH': '/ms-playwright',
+                'DATA_DIR': os.environ.get('DATA_DIR', '/app/data'),
+                'CONFIG_DIR': os.environ.get('CONFIG_DIR', '/app/configs'),
+                'LOG_DIR': os.environ.get('LOG_DIR', '/app/logs')
+            }
+            
+            logger.info(f"Environment variables: DB_FILE={env_vars['DB_FILE']}, LOG_FILE={env_vars['LOG_FILE']}, DATA_DIR={env_vars['DATA_DIR']}, CONFIG_DIR={env_vars['CONFIG_DIR']}, LOG_DIR={env_vars['LOG_DIR']}")
+            
             process = await asyncio.create_subprocess_exec(
                 *cmd_parts,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
+                env=env_vars,
+                cwd='/app'  # Explicitly set working directory to /app
             )
             
-            # Wait for the process to complete
-            stdout, stderr = await process.communicate()
+            # Define callback functions with proper log level handling
+            def log_stdout(text):
+                logger.info(f"Scraper output: {text}")
+                
+            def log_stderr(text):
+                # Parse the log level from the message if possible
+                if "[INFO]" in text:
+                    logger.info(f"Scraper: {text}")
+                elif "[WARNING]" in text:
+                    logger.warning(f"Scraper: {text}")
+                elif "[DEBUG]" in text:
+                    logger.debug(f"Scraper: {text}")
+                else:
+                    # Default to error for any other messages
+                    logger.error(f"Scraper error: {text}")
+            
+            # Stream output in real-time
+            async def read_stream(stream, callback):
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    text = line.decode('utf-8').strip()
+                    if text:
+                        callback(text)
+                        
+            # Create tasks to read both stdout and stderr
+            stdout_task = asyncio.create_task(read_stream(process.stdout, log_stdout))
+            stderr_task = asyncio.create_task(read_stream(process.stderr, log_stderr))
+            
+            # Wait for the process and streams to complete
+            await asyncio.gather(stdout_task, stderr_task)
+            await process.wait()
+            
+            # Get the final output for summary
+            stdout = await process.stdout.read()
+            stderr = await process.stderr.read()
             
             # Check the result
             if process.returncode == 0:

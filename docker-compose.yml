@@ -10,15 +10,35 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      # Database & Logging Configuration
       - DB_FILE=/app/data/workday_jobs.db
       - LOG_FILE=/app/logs/workday_scraper.log
-      - LOG_LEVEL=INFO
-      - CONFIG_FILE=autodesk.txt  # Default config file to use for scheduled runs
-      - TZ=America/Los_Angeles    # Set your timezone here
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Scraper Configuration
+      - CONFIG_FILE=${CONFIG_FILE:-autodesk.txt}
+      
+      # Timezone (set to your server timezone)
+      - TZ=${TZ:-America/Los_Angeles}
+      
+      # Playwright Configuration
+      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+      - PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1  # Skip download during pip install
+      # Chrome sandbox configuration
+      - CHROME_SANDBOX_PATH=/tmp/.chrome-sandbox
+      - PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/ms-playwright/chromium-1071/chrome-linux/chrome
+      - PLAYWRIGHT_SKIP_VALIDATION=true
+      
+      # Directory Configuration
+      - DATA_DIR=/app/data
+      - CONFIG_DIR=/app/configs
+      - LOG_DIR=/app/logs
     volumes:
-      - ./data:/app/data        # Database storage
-      - ./configs:/app/configs  # Configuration files
-      - ./logs:/app/logs        # Log files
+      # Ensure these directories exist on your host
+      - ~/docker_persistent_config/workday_scraper/data:/app/data
+      - ~/docker_persistent_config/workday_scraper/configs:/app/configs
+      - ~/docker_persistent_config/workday_scraper/logs:/app/logs
+      - ~/docker_persistent_config/workday_scraper/playwright-cache:/ms-playwright:rw,z
     networks:
       - workday-net
     healthcheck:

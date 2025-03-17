@@ -5,7 +5,6 @@ This module integrates all the components of the Workday Scraper and provides
 a clean interface for scraping job postings from Workday sites using the JSON-LD
 extraction approach for significantly improved performance and completeness.
 """
-
 import os
 import json
 import logging
@@ -20,13 +19,41 @@ from .db_manager import DatabaseManager
 
 logger = get_logger()
 
+def get_file_path(filename, file_type="data"):
+    """Get absolute path for a file in the appropriate directory.
+    
+    Args:
+        filename (str): The filename to get the path for.
+        file_type (str): The type of file ('data', 'configs', 'logs').
+        
+    Returns:
+        str: The absolute path to the file.
+    """
+    # Determine if running in Docker
+    in_docker = os.path.exists("/.dockerenv")
+    
+    # Set base directory based on environment
+    base_dir = "/app" if in_docker else os.getcwd()
+    
+    # Get directory based on file type
+    if file_type == "data":
+        directory = os.environ.get("DATA_DIR", os.path.join(base_dir, "data"))
+    elif file_type == "configs":
+        directory = os.environ.get("CONFIG_DIR", os.path.join(base_dir, "configs"))
+    elif file_type == "logs":
+        directory = os.environ.get("LOG_DIR", os.path.join(base_dir, "logs"))
+    else:
+        directory = os.environ.get("DATA_DIR", os.path.join(base_dir, "data"))
+    
+    return os.path.join(directory, filename)
+
 
 
 class WorkdayScraper:
     """Main controller for the Workday Scraper using JSON-LD extraction."""
     
     def __init__(self, config_file=None, initial=False, concurrency=10,
-                log_file=None, log_level="INFO", db_file="workday_jobs.db"):
+                log_file=None, log_level="INFO", db_file=None):
         """Initialize the WorkdayScraper.
         
         Args:
@@ -49,8 +76,14 @@ class WorkdayScraper:
         self.initial = initial
         self.concurrency = concurrency
         
+        # Determine if running in Docker
+        in_docker = os.path.exists("/.dockerenv")
+        base_dir = "/app" if in_docker else os.getcwd()
+        
+        # Use environment variable for DB file or fallback to default
+        self.db_file = db_file or os.environ.get("DB_FILE", os.path.join(base_dir, "data/workday_jobs.db"))
         # Initialize database manager
-        self.db_manager = DatabaseManager(db_file=db_file)
+        self.db_manager = DatabaseManager(db_file=self.db_file)
         
         # Initialize job IDs dictionary
         self.job_ids_dict = {}
@@ -79,7 +112,8 @@ class WorkdayScraper:
         self.company_urls = {}
         
         try:
-            config_path = os.path.join("configs", config_file)
+            config_path = get_file_path(config_file, "configs")
+            logger.info(f"Loading config from: {config_path}")
             with open(config_path, "r") as inputfile:
                 for line in inputfile:
                     if line.strip() and "," in line:
@@ -114,8 +148,9 @@ class WorkdayScraper:
                 self.job_ids_dict = {}
             
             # For backward compatibility, also check the JSON file
-            if os.path.exists("job_ids.json"):
-                with open("job_ids.json", "r") as f:
+            job_ids_path = get_file_path("job_ids.json", "data")
+            if os.path.exists(job_ids_path):
+                with open(job_ids_path, "r") as f:
                     json_job_ids = json.load(f)
                 
                 logger.info(f"Loaded job IDs from JSON file with {len(json_job_ids)} companies")
@@ -141,10 +176,11 @@ class WorkdayScraper:
     def save_job_ids(self):
         """Save job IDs to the JSON file for backward compatibility."""
         try:
-            with open("job_ids.json", "w") as f:
+            job_ids_path = get_file_path("job_ids.json", "data")
+            with open(job_ids_path, "w") as f:
                 json.dump(self.job_ids_dict, f)
             
-            logger.info(f"Saved job IDs dictionary with {len(self.job_ids_dict)} companies to JSON file")
+            logger.info(f"Saved job IDs dictionary with {len(self.job_ids_dict)} companies to {job_ids_path}")
         except Exception as e:
             logger.error(f"Error saving job IDs dictionary to JSON file: {str(e)}")
     
@@ -266,9 +302,10 @@ class WorkdayScraper:
         if output_json:
             try:
                 jsondata = json.dumps(jobs, indent=2)
-                with open("job_postings.json", "w") as jsonfile:
+                json_path = get_file_path("job_postings.json", "data")
+                with open(json_path, "w") as jsonfile:
                     jsonfile.write(jsondata)
-                logger.info(f"Saved {len(jobs)} jobs to job_postings.json")
+                logger.info(f"Saved {len(jobs)} jobs to {json_path}")
             except Exception as e:
                 logger.error(f"Error saving JSON: {str(e)}")
         
@@ -305,10 +342,11 @@ class WorkdayScraper:
                 rss += "\n</channel>\n</rss>"
                 
                 # Write to file
-                with open("rss.xml", "w") as rssfile:
+                rss_path = get_file_path("rss.xml", "data")
+                with open(rss_path, "w") as rssfile:
                     rssfile.write(rss)
                 
-                logger.info(f"Saved {len(jobs)} jobs to rss.xml")
+                logger.info(f"Saved {len(jobs)} jobs to {rss_path}")
             except Exception as e:
                 logger.error(f"Error saving RSS: {str(e)}")
         
@@ -406,7 +444,12 @@ async def run_scraper(args):
     concurrency = args.get("max_workers", 10)  # Use max_workers as concurrency
     log_file = args.get("log_file", "workday_scraper.log")
     log_level = args.get("log_level", "INFO")
-    db_file = args.get("db_file", "workday_jobs.db")
+    # Determine base directory based on environment
+    in_docker = os.path.exists("/.dockerenv")
+    base_dir = "/app" if in_docker else os.getcwd()
+    
+    # Set DB file path
+    db_file = args.get("db_file") or os.environ.get("DB_FILE", os.path.join(base_dir, "data/workday_jobs.db"))
     
     # Email arguments
     sender = args.get("email")

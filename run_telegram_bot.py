@@ -45,17 +45,31 @@ async def main():
     
     args = parser.parse_args()
     
-    # Configure logging
-    numeric_level = getattr(logging, args.log_level.upper(), None)
+    # Environment paths for Docker
+    default_db_path = "/app/data/workday_jobs.db"
+    default_log_path = "/app/logs/telegram_bot.log"
+    
+    # Get configuration from environment variables first, fallback to command line args
+    db_file = os.environ.get("DB_FILE", default_db_path if os.path.exists("/app") else args.db_file)
+    log_file = os.environ.get("LOG_FILE", default_log_path if os.path.exists("/app") else args.log_file)
+    log_level = os.environ.get("LOG_LEVEL", args.log_level)
+
+    # Configure logging first
+    numeric_level = getattr(logging, log_level.upper(), None)
     if not isinstance(numeric_level, int):
         numeric_level = logging.INFO
     
-    configure_logger(log_file=args.log_file, log_level=numeric_level)
+    configure_logger(log_file=log_file, log_level=numeric_level)
     logger = get_logger()
-    
+
+    # Now we can log
+    logger.info(f"Using database path: {db_file}")
+    logger.info(f"Using log file path: {log_file}")
+
     # Check for required environment variables
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    config_dir = os.environ.get("CONFIG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs"))
     
     if not token:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is not set")
@@ -72,8 +86,8 @@ async def main():
         return 1
     
     # Initialize database manager
-    db_manager = DatabaseManager(db_file=args.db_file)
-    logger.info(f"Connected to database: {args.db_file}")
+    db_manager = DatabaseManager(db_file=db_file)
+    logger.info(f"Connected to database: {db_file}")
     
     # Initialize Telegram bot
     try:
@@ -82,8 +96,8 @@ async def main():
         
         # Print success message with instructions
         print(f"Telegram bot started successfully")
-        print(f"Log file: {args.log_file}")
-        print(f"Using database: {args.db_file}")
+        print(f"Log file: {log_file}")
+        print(f"Using database: {db_file}")
         print("\nAvailable commands:")
         print("- /start - Get started with the bot")
         print("- /help - Show available commands")

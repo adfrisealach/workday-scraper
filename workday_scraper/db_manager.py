@@ -6,10 +6,14 @@ job postings scraped from Workday sites.
 """
 
 import os
+import pwd
+import grp
+import shutil
 import sqlite3
 import logging
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
+from pathlib import Path
 
 from .logging_utils import get_logger
 
@@ -19,38 +23,219 @@ logger = get_logger()
 class DatabaseManager:
     """Manager for SQLite database operations."""
     
-    def __init__(self, db_file="workday_jobs.db"):
+    def __init__(self, db_file=None):
         """Initialize the DatabaseManager.
         
         Args:
-            db_file (str): Path to the SQLite database file.
+            db_file (str, optional): Path to the SQLite database file.
+                If not provided, will use DB_FILE environment variable
+                or fallback to "workday_jobs.db"
         """
-        self.db_file = db_file
+        self.db_file = db_file or os.environ.get("DB_FILE", "workday_jobs.db")
+        self.backup_file = f"{self.db_file}.bak"
         self.conn = None
         self.cursor = None
         
-        # Initialize the database
+        logger.info(f"Initializing DatabaseManager with file: {self.db_file}")
         self._initialize_db()
-    
+
+    def _check_file_permissions(self):
+        """Check and log file permissions and ownership."""
+        try:
+            if os.path.exists(self.db_file):
+                stat_info = os.stat(self.db_file)
+                user = pwd.getpwuid(stat_info.st_uid).pw_name
+                group = grp.getgrgid(stat_info.st_gid).gr_name
+                logger.info(f"Database file: {self.db_file}")
+                logger.info(f"Size: {stat_info.st_size} bytes")
+                logger.info(f"Owner: {user}:{group}")
+                logger.info(f"Permissions: {oct(stat_info.st_mode)[-3:]}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error checking permissions: {e}")
+            return False
+
+    def _setup_connection(self):
+        """Set up the database connection with proper settings."""
+        self.conn = sqlite3.connect(
+            self.db_file,
+            timeout=20,
+            isolation_level=None
+        )
+        self.conn.execute('PRAGMA journal_mode=WAL')
+        self.conn.execute('PRAGMA busy_timeout=5000')
+        self.conn.row_factory = sqlite3.Row
+        self.cursor = self.conn.cursor()
+        logger.info("Database connection established")
+    def _check_db_integrity(self):
+        """Check database integrity and create backup if needed."""
+        try:
+            # Try to open a separate connection for verification
+            verify_conn = sqlite3.connect(self.db_file)
+            verify_conn.row_factory = sqlite3.Row
+            verify_cur = verify_conn.cursor()
+            
+            logger.info("Running database diagnostics...")
+            
+            # Run integrity check
+            verify_cur.execute("PRAGMA integrity_check")
+            result = verify_cur.fetchone()
+            
+            if result and result[0] == "ok":
+                # Try a test query
+                try:
+                    verify_cur.execute("SELECT COUNT(*) as count, MIN(created_at) as earliest, MAX(created_at) as latest FROM jobs")
+                    job_stats = verify_cur.fetchone()
+                    if job_stats:
+                        logger.info(f"Database verification - Total jobs: {job_stats['count']}")
+                        logger.info(f"Database verification - Date range: {job_stats['earliest']} to {job_stats['latest']}")
+                except sqlite3.Error as e:
+                    logger.error(f"Test query failed: {str(e)}")
+                    return False
+                    
+                logger.info("Database integrity check passed")
+                verify_conn.close()
+                return True
+            else:
+                logger.error("Database integrity check failed")
+                verify_conn.close()
+                return False
+                
+        except sqlite3.Error as e:
+            logger.error(f"SQLite error during integrity check: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Error during integrity check: {str(e)}")
+            return False
+
+    def _backup_database(self):
+        """Create a backup of the database file."""
+        try:
+            import shutil
+            shutil.copy2(self.db_file, self.backup_file)
+            logger.info(f"Created backup at {self.backup_file}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create backup: {str(e)}")
+            return False
+
+    def _restore_from_backup(self):
+        """Restore database from backup file."""
+        try:
+            import shutil
+            if os.path.exists(self.backup_file):
+                shutil.copy2(self.backup_file, self.db_file)
+                logger.info(f"Restored from backup {self.backup_file}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to restore from backup: {str(e)}")
+            return False
+
     def _initialize_db(self):
         """Initialize the database connection and create tables if they don't exist."""
         try:
-            # Create the database directory if it doesn't exist
+            # Setup directory
             db_dir = os.path.dirname(self.db_file)
             if db_dir and not os.path.exists(db_dir):
                 os.makedirs(db_dir)
-            
-            # Connect to the database
-            self.conn = sqlite3.connect(self.db_file)
-            self.conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+                logger.info(f"Created directory: {db_dir}")
+
+            # Check file permissions if exists
+            if os.path.exists(self.db_file):
+                stat_info = os.stat(self.db_file)
+                try:
+                    user = pwd.getpwuid(stat_info.st_uid).pw_name
+                    group = grp.getgrgid(stat_info.st_gid).gr_name
+                    current_user = pwd.getpwuid(os.getuid()).pw_name
+                    logger.info(f"File: {self.db_file} ({stat_info.st_size} bytes)")
+                    logger.info(f"Owner: {user}:{group}, Current user: {current_user}")
+                    logger.info(f"Permissions: {oct(stat_info.st_mode)[-3:]}")
+                except (KeyError, ImportError):
+                    logger.info(f"File: {self.db_file} (UID: {stat_info.st_uid}, GID: {stat_info.st_gid})")
+
+            # Check database file accessibility before connecting
+            if os.path.exists(self.db_file):
+                if not os.access(self.db_file, os.R_OK | os.W_OK):
+                    logger.error(f"Insufficient permissions on {self.db_file}")
+                    logger.error(f"Current process user: {pwd.getpwuid(os.getuid()).pw_name}")
+                    logger.error(f"File owner: {pwd.getpwuid(os.stat(self.db_file).st_uid).pw_name}")
+                    raise PermissionError(f"Cannot read/write database file: {self.db_file}")
+            else:
+                logger.info(f"Database file will be created: {self.db_file}")
+                # Try to create an empty file to test permissions
+                try:
+                    with open(self.db_file, 'a'):
+                        pass
+                except IOError as e:
+                    logger.error(f"Cannot create database file: {e}")
+                    raise
+
+            # Connect to database with optimized settings
+            logger.info("Establishing database connection...")
+            self.conn = sqlite3.connect(
+                self.db_file,
+                timeout=60.0,
+                isolation_level='IMMEDIATE'
+            )
+            self.conn.row_factory = sqlite3.Row
             self.cursor = self.conn.cursor()
+
+            # Configure for reliability and concurrency
+            pragmas = [
+                ('journal_mode', 'WAL'),
+                ('synchronous', 'NORMAL'),
+                ('busy_timeout', '60000'),
+                ('cache_size', '10000'),
+                ('temp_store', 'MEMORY'),
+                ('locking_mode', 'NORMAL'),
+                ('foreign_keys', 'ON')
+            ]
             
-            # Create tables if they don't exist
-            self._create_tables()
+            for pragma, value in pragmas:
+                try:
+                    self.cursor.execute(f'PRAGMA {pragma} = {value}')
+                    result = self.cursor.execute(f'PRAGMA {pragma}').fetchone()
+                    logger.info(f"PRAGMA {pragma} = {result[0]}")
+                except sqlite3.Error as e:
+                    logger.warning(f"Failed to set PRAGMA {pragma}: {e}")
             
-            logger.info(f"Initialized database connection to {self.db_file}")
+            # Check existing tables
+            self.cursor.execute("""
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type='table' AND name IN ('jobs', 'companies')
+            """)
+            table_count = self.cursor.fetchone()[0]
+            
+            if table_count == 2:
+                try:
+                    self.cursor.execute("SELECT COUNT(*) FROM jobs")
+                    job_count = self.cursor.fetchone()[0]
+                    self.cursor.execute("SELECT COUNT(*) FROM companies")
+                    company_count = self.cursor.fetchone()[0]
+                    
+                    logger.info(f"Found {job_count} jobs and {company_count} companies")
+                    if job_count > 0 or company_count > 0:
+                        self._backup_database()
+                except sqlite3.Error as e:
+                    logger.warning(f"Error checking tables: {e}, recreating...")
+                    self._create_tables()
+            else:
+                logger.info("Creating new tables")
+                self._create_tables()
+
+        except sqlite3.Error as e:
+            logger.error(f"Database error: {e}")
+            if self.conn:
+                self.conn.close()
+                self.conn = None
+            raise
         except Exception as e:
-            logger.error(f"Error initializing database: {str(e)}")
+            logger.error(f"Error: {e}")
+            if self.conn:
+                self.conn.close()
+                self.conn = None
             raise
     
     def _create_tables(self):
@@ -268,6 +453,13 @@ class DatabaseManager:
             list: List of job dictionaries.
         """
         try:
+            # First check if tables exist and have data
+            self.cursor.execute("""
+                SELECT COUNT(*) as count FROM jobs
+            """)
+            job_count = self.cursor.fetchone()['count']
+            logger.info(f"Found {job_count} jobs in database at {self.db_file}")
+
             self.cursor.execute("""
                 SELECT j.*, c.name as company_name, c.url as company_url
                 FROM jobs j
@@ -284,6 +476,7 @@ class DatabaseManager:
                 job['company'] = job.pop('company_name')
                 jobs.append(job)
             
+            logger.info(f"Returning {len(jobs)} jobs with company data")
             return jobs
         except Exception as e:
             logger.error(f"Error getting all jobs: {str(e)}")
