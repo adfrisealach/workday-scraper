@@ -10,7 +10,8 @@ A robust web scraper to get the latest job postings from Workday sites using JSO
 ## Features
 
 - **10-20x faster** than traditional scraping methods using JSON-LD extraction
-- No browser dependencies required (no Selenium, no ChromeDriver)
+- Primary extraction uses JSON-LD data (no browser required)
+- Browser automation available as fallback for reliability
 - Scrape listings from any standard Workday job posting site
 - Custom site list in text config file
 - SQLite database storage for job data
