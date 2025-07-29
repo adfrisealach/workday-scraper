@@ -1,87 +1,66 @@
 """
-Main controller for the Workday Scraper.
+Scraper controller for the Workday Scraper.
 
-This module integrates all the components of the Workday Scraper and provides
-a clean interface for scraping job postings from Workday sites using the JSON-LD
-extraction approach for significantly improved performance and completeness.
+This module provides the main controller class for scraping Workday job postings
+and coordinating the various components of the scraper.
 """
-import os
+
+import asyncio
 import json
 import logging
-import asyncio
-from datetime import datetime
-from typing import Dict, List, Any, Optional, Tuple
+import os
+import time
+from typing import Dict, List, Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .logging_utils import get_logger, configure_logger
-from .jsonld_extractor import scrape_workday_jobs
 from .db_manager import DatabaseManager
-# Import for Telegram bot - initialized later to avoid circular imports
+from .jsonld_extractor import scrape_workday_jobs
+from .rss_funcs import generate_rss
+from .email_funcs import compose_email, send_email
+from .logging_utils import get_logger
+from .path_utils import get_base_dir, get_data_dir, get_configs_dir
 
 logger = get_logger()
 
-def get_file_path(filename, file_type="data"):
-    """Get absolute path for a file in the appropriate directory.
-    
-    Args:
-        filename (str): The filename to get the path for.
-        file_type (str): The type of file ('data', 'configs', 'logs').
-        
-    Returns:
-        str: The absolute path to the file.
-    """
-    # Determine if running in Docker
-    in_docker = os.path.exists("/.dockerenv")
-    
-    # Set base directory based on environment
-    base_dir = "/app" if in_docker else os.getcwd()
-    
-    # Get directory based on file type
-    if file_type == "data":
-        directory = os.environ.get("DATA_DIR", os.path.join(base_dir, "data"))
-    elif file_type == "configs":
-        directory = os.environ.get("CONFIG_DIR", os.path.join(base_dir, "configs"))
-    elif file_type == "logs":
-        directory = os.environ.get("LOG_DIR", os.path.join(base_dir, "logs"))
-    else:
-        directory = os.environ.get("DATA_DIR", os.path.join(base_dir, "data"))
-    
-    return os.path.join(directory, filename)
-
-
 
 class WorkdayScraper:
-    """Main controller for the Workday Scraper using JSON-LD extraction."""
+    """Main scraper controller class."""
     
-    def __init__(self, config_file=None, initial=False, concurrency=10,
-                log_file=None, log_level="INFO", db_file=None):
+    def __init__(self, config_file: str = None, initial: bool = False, 
+                 max_workers: int = 5, max_sessions: int = 3, chunk_size: int = 10,
+                 db_file: str = None):
         """Initialize the WorkdayScraper.
         
         Args:
-            config_file (str, optional): Path to the config file.
-            initial (bool): Whether to scrape all listings or only today's.
-            concurrency (int): Maximum number of concurrent HTTP requests.
-            log_file (str, optional): Path to the log file.
-            log_level (str): Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+            config_file (str): Path to the configuration file.
+            initial (bool): Whether to perform an initial scrape of all jobs.
+            max_workers (int): Maximum number of worker threads for scraping.
+            max_sessions (int): Maximum number of concurrent browser sessions.
+            chunk_size (int): Number of jobs to process in each chunk.
             db_file (str): Path to the SQLite database file.
         """
-        # Configure logging
-        numeric_level = getattr(logging, log_level.upper(), None)
-        if not isinstance(numeric_level, int):
-            numeric_level = logging.INFO
+        # Get base directory using reliable path resolution
+        base_dir = get_base_dir()
         
-        configure_logger(log_file=log_file, log_level=numeric_level)
-        
-        # Initialize settings
         self.config_file = config_file
         self.initial = initial
-        self.concurrency = concurrency
+        self.max_workers = max_workers
+        self.max_sessions = max_sessions
+        self.chunk_size = chunk_size
+        self.companies = []
         
-        # Determine if running in Docker
-        in_docker = os.path.exists("/.dockerenv")
-        base_dir = "/app" if in_docker else os.getcwd()
+        # Load configuration
+        if config_file:
+            self.load_config(config_file)
+        
+        # Initialize database manager with explicit file path
+        logger.info(f"Initializing scraper with base directory: {base_dir}")
+        
+        # Get base directory using reliable path resolution  
+        base_dir = get_base_dir()
         
         # Use environment variable for DB file or fallback to default
-        self.db_file = db_file or os.environ.get("DB_FILE", os.path.join(base_dir, "data/workday_jobs.db"))
+        self.db_file = db_file or os.environ.get("DB_FILE", os.path.join(get_data_dir(), "workday_jobs.db"))
         # Initialize database manager
         self.db_manager = DatabaseManager(db_file=self.db_file)
         
@@ -89,420 +68,321 @@ class WorkdayScraper:
         self.job_ids_dict = {}
         self.load_job_ids()
         
-        # Initialize company URLs
-        self.company_urls = {}
-        if config_file:
-            self.load_config(config_file)
-        
-        logger.info("Initialized WorkdayScraper with JSON-LD extraction", extra={
-            "initial": initial,
-            "concurrency": concurrency,
-            "config_file": config_file,
-            "db_file": db_file
-        })
-    def load_config(self, config_file):
-        """Load company URLs from a config file.
+        logger.info(f"Initialized WorkdayScraper with JSON-LD extraction", 
+                   extra={
+                       "initial": initial,
+                       "concurrency": max_workers,
+                       "config_file": config_file,
+                       "db_file": self.db_file
+                   })
+    
+    def load_config(self, config_file: str):
+        """Load companies from configuration file.
         
         Args:
-            config_file (str): Path to the config file.
-        
-        Returns:
-            dict: Company URLs.
+            config_file (str): Path to the configuration file.
         """
-        self.company_urls = {}
-        
         try:
-            config_path = get_file_path(config_file, "configs")
+            # Use reliable path resolution for config files
+            if not os.path.isabs(config_file):
+                config_path = os.path.join(get_configs_dir(), config_file)
+            else:
+                config_path = config_file
+                
             logger.info(f"Loading config from: {config_path}")
-            with open(config_path, "r") as inputfile:
-                for line in inputfile:
-                    if line.strip() and "," in line:
-                        name, url = line.strip().split(",", 1)
-                        self.company_urls[name] = url.strip()
             
-            logger.info(f"Loaded {len(self.company_urls)} companies from config",
-                       extra={"config_file": config_file})
+            with open(config_path, 'r') as f:
+                lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
             
-            # Initialize job IDs for new companies
-            for company in self.company_urls:
-                if company not in self.job_ids_dict:
-                    self.job_ids_dict[company] = []
+            self.companies = []
+            for line in lines:
+                if ',' in line:
+                    # Old format: company_name,url
+                    name, url = line.split(',', 1)
+                    self.companies.append(url.strip())
+                else:
+                    # New format: just url
+                    self.companies.append(line)
             
-            return self.company_urls
+            logger.info(f"Loaded {len(self.companies)} companies from config", 
+                       extra={"config_file": os.path.basename(config_file)})
+        except FileNotFoundError:
+            logger.error(f"Configuration file not found: {config_path}")
+            raise
         except Exception as e:
-            logger.error(f"Error loading config file: {str(e)}",
-                        extra={"config_file": config_file})
+            logger.error(f"Error loading configuration: {str(e)}")
             raise
     
     def load_job_ids(self):
-        """Load job IDs from the database and/or JSON file."""
+        """Load job IDs from the database or JSON file."""
         try:
-            # First try to load from the database
-            db_job_ids = self.db_manager.get_job_ids_by_company()
-            
-            if db_job_ids:
-                logger.info(f"Loaded job IDs from database with {len(db_job_ids)} companies")
-                self.job_ids_dict = db_job_ids
-            else:
-                logger.info("No job IDs found in database")
-                self.job_ids_dict = {}
-            
-            # For backward compatibility, also check the JSON file
-            job_ids_path = get_file_path("job_ids.json", "data")
-            if os.path.exists(job_ids_path):
-                with open(job_ids_path, "r") as f:
-                    json_job_ids = json.load(f)
-                
-                logger.info(f"Loaded job IDs from JSON file with {len(json_job_ids)} companies")
-                
-                # Merge the two sources
-                for company, job_ids in json_job_ids.items():
-                    if company not in self.job_ids_dict:
-                        self.job_ids_dict[company] = []
-                    
-                    # Add any job IDs that aren't already in the database
-                    for job_id in job_ids:
-                        if job_id not in self.job_ids_dict[company]:
-                            self.job_ids_dict[company].append(job_id)
+            # First try to load from database
+            self.job_ids_dict = self.db_manager.get_job_ids_by_company()
             
             if not self.job_ids_dict:
-                logger.info("No existing job IDs found, creating a new dictionary")
-                self.job_ids_dict = {}
+                logger.info("No job IDs found in database")
+                
+                # Try to load from JSON file as fallback
+                json_path = os.path.join(get_data_dir(), "job_ids.json")
+                if os.path.exists(json_path):
+                    with open(json_path, 'r') as f:
+                        self.job_ids_dict = json.load(f)
+                    logger.info(f"Loaded job IDs from JSON file with {len(self.job_ids_dict)} companies")
+                else:
+                    logger.info("No existing job IDs file found, starting fresh")
+            else:
+                logger.info(f"Loaded job IDs from database with {len(self.job_ids_dict)} companies")
                 
         except Exception as e:
             logger.error(f"Error loading job IDs: {str(e)}")
             self.job_ids_dict = {}
     
     def save_job_ids(self):
-        """Save job IDs to the JSON file for backward compatibility."""
+        """Save job IDs dictionary to JSON file."""
         try:
-            job_ids_path = get_file_path("job_ids.json", "data")
-            with open(job_ids_path, "w") as f:
-                json.dump(self.job_ids_dict, f)
+            json_path = os.path.join(get_data_dir(), "job_ids.json")
             
-            logger.info(f"Saved job IDs dictionary with {len(self.job_ids_dict)} companies to {job_ids_path}")
+            # Ensure the data directory exists
+            os.makedirs(os.path.dirname(json_path), exist_ok=True)
+            
+            with open(json_path, 'w') as f:
+                json.dump(self.job_ids_dict, f, indent=2)
+            
+            logger.info(f"Saved job IDs dictionary with {len(self.job_ids_dict)} companies to {json_path}")
         except Exception as e:
-            logger.error(f"Error saving job IDs dictionary to JSON file: {str(e)}")
-    
-    async def scrape_company(self, company_name, company_url):
-        """Scrape job listings for a company using JSON-LD extraction.
+            logger.error(f"Error saving job IDs: {str(e)}")
+
+    async def scrape_company(self, company_name: str) -> List[Dict[str, Any]]:
+        """Scrape jobs for a single company.
         
         Args:
-            company_name (str): Name of the company.
-            company_url (str): URL of the company's job listings.
-        
-        Returns:
-            list: Complete job information.
-        """
-        logger.info(f"Scraping {company_name} at {company_url}")
-        
-        # Try different URL formats if needed
-        jobs = []
-        urls_to_try = [company_url]
-        
-        # Add alternative URL formats
-        if 'en-US' not in company_url and '/en-US/' not in company_url:
-            # Try adding en-US to the URL
-            parsed_url = company_url.split('/')
-            if len(parsed_url) >= 3:
-                domain = '/'.join(parsed_url[:3])  # Get the domain part
-                path = '/'.join(parsed_url[3:])    # Get the path part
-                alt_url = f"{domain}/en-US/{path}"
-                urls_to_try.append(alt_url)
-        
-        # Try removing query parameters
-        if '?' in company_url:
-            base_url = company_url.split('?')[0]
-            if base_url not in urls_to_try:
-                urls_to_try.append(base_url)
-        
-        # Try each URL until we get a good result
-        for i, url in enumerate(urls_to_try):
-            logger.info(f"Trying URL format {i+1}/{len(urls_to_try)}: {url}")
-            try:
-                current_jobs = await scrape_workday_jobs(url)
-                if current_jobs and len(current_jobs) > 0:
-                    logger.info(f"Successfully scraped {len(current_jobs)} jobs with URL: {url}")
-                    jobs = current_jobs
-                    if len(jobs) > 20:  # If we got more than the default page size, this is probably good
-                        break
-                else:
-                    logger.warning(f"No jobs found with URL: {url}")
-            except Exception as e:
-                logger.error(f"Error scraping with URL {url}: {str(e)}")
-        
-        if not jobs:
-            logger.error(f"Failed to scrape jobs for {company_name} with any URL format")
-            return []
-        
-        # Filter for new jobs if needed
-        if not self.initial:
-            new_jobs = []
-            for job in jobs:
-                job_id = job.get('job_id')
-                if job_id and job_id not in self.job_ids_dict[company_name]:
-                    new_jobs.append(job)
-                    self.job_ids_dict[company_name].append(job_id)
+            company_name (str): Name of the company to scrape.
             
-            logger.info(f"Found {len(new_jobs)} new jobs out of {len(jobs)} total jobs")
-            jobs = new_jobs
-        else:
-            # In initial mode, save all job IDs
-            for job in jobs:
-                job_id = job.get('job_id')
-                if job_id and job_id not in self.job_ids_dict[company_name]:
-                    self.job_ids_dict[company_name].append(job_id)
-            
-            logger.info(f"Initial mode: Saving all {len(jobs)} jobs")
-        
-        # Add company and timestamp to each job
-        for job in jobs:
-            job['company'] = company_name
-            job['timestamp'] = datetime.now().isoformat()
-        
-        logger.info(f"Processed {len(jobs)} jobs for {company_name}")
-        return jobs
-    
-    async def scrape_all_companies(self):
-        """Scrape job listings for all companies in the config.
-        
         Returns:
-            list: Complete job information for all scraped jobs.
+            List[Dict[str, Any]]: List of job dictionaries.
         """
+        logger.info(f"Scraping {company_name} at {company_name}")
+        
+        # Get existing job IDs for this company
+        existing_job_ids = set(self.job_ids_dict.get(company_name, []))
+        
+        # Try different URL formats
+        url_formats = [
+            f"{company_name}?timeType=6d5ece62cf5a4f9f9e349b55f045b5e2",
+            f"{company_name}?timeType=6d5ece62cf5a4f9f9e349b55f045b5e2&Location_Country=bc33aa3152ec42d4995f4791a106ed09",
+            f"{company_name}"
+        ]
+        
         all_jobs = []
         
-        # Scrape job listings for each company
-        for company_name, company_url in self.company_urls.items():
-            jobs = await self.scrape_company(company_name, company_url)
-            all_jobs.extend(jobs)
+        for i, url in enumerate(url_formats, 1):
+            try:
+                logger.info(f"Trying URL format {i}/{len(url_formats)}: {url}")
+                
+                # Use the JSON-LD extractor
+                jobs = await scrape_workday_jobs(url)
+                
+                if jobs:
+                    # Add company info to each job
+                    for job in jobs:
+                        # Extract company name from URL domain
+                        import re
+                        match = re.search(r'https?://([^.]+)\.', url)
+                        company_name_extracted = match.group(1) if match else 'unknown'
+                        job['company'] = company_name_extracted
+                        job['company_url'] = url
+                    
+                    all_jobs.extend(jobs)
+                    logger.info(f"Successfully scraped {len(jobs)} jobs from {company_name} using format {i}")
+                    break  # Success, no need to try other formats
+                else:
+                    logger.warning(f"No jobs found for {company_name} using format {i}")
+                    
+            except Exception as e:
+                logger.error(f"Error scraping {company_name} with format {i}: {str(e)}")
+                continue
         
-        logger.info(f"Successfully scraped {len(all_jobs)} total jobs")
+        if not all_jobs:
+            logger.warning(f"No jobs found for {company_name} using any URL format")
+        
         return all_jobs
     
-    def save_results(self, jobs, output_json=False, output_rss=False):
-        """Save the scraped jobs to the database and optionally to output files.
-        
-        Args:
-            jobs (list): Scraped job information.
-            output_json (bool): Whether to output JSON.
-            output_rss (bool): Whether to output RSS.
-        """
-        if not jobs:
-            logger.warning("No jobs to save")
-            return
-        
-        # Save to database
-        try:
-            saved, failed = self.db_manager.save_jobs(jobs)
-            logger.info(f"Saved {saved} jobs to database, {failed} failed")
-        except Exception as e:
-            logger.error(f"Error saving to database: {str(e)}")
-        
-        # Save to JSON if requested
-        if output_json:
-            try:
-                jsondata = json.dumps(jobs, indent=2)
-                json_path = get_file_path("job_postings.json", "data")
-                with open(json_path, "w") as jsonfile:
-                    jsonfile.write(jsondata)
-                logger.info(f"Saved {len(jobs)} jobs to {json_path}")
-            except Exception as e:
-                logger.error(f"Error saving JSON: {str(e)}")
-        
-        # Save to RSS if requested
-        if output_rss:
-            try:
-                # Generate RSS feed
-                rss = """\
-<?xml version="1.0" encoding="UTF-8" ?>
-<rss version="2.0">
-
-<channel>
-<title>Workday Scraper - RSS Feed</title>
-<link>https://github.com/christopherlam888/workday-scraper</link>
-<description>An RSS feed for new Workday postings.</description>
-"""
-                
-                for job in jobs:
-                    # Use description field from JSON-LD data
-                    job_description = job.get("description", "").replace("\n", "<br>")
-                    
-                    rss += """\
-<item>
-    <title><![CDATA[{}]]></title>
-    <link><![CDATA[{}]]></link>
-    <description><![CDATA[{}]]></description>
-</item>
-""".format(
-                        f"{job.get('company', '')}: {job.get('title', '')}",
-                        f"{job.get('url', '')}",
-                        f"{job_description}",
-                    )
-                
-                rss += "\n</channel>\n</rss>"
-                
-                # Write to file
-                rss_path = get_file_path("rss.xml", "data")
-                with open(rss_path, "w") as rssfile:
-                    rssfile.write(rss)
-                
-                logger.info(f"Saved {len(jobs)} jobs to {rss_path}")
-            except Exception as e:
-                logger.error(f"Error saving RSS: {str(e)}")
-        
-        # Save job IDs for backward compatibility
-        self.save_job_ids()
-    
-    def send_email_notification(self, jobs, sender, recipients, password):
-        """Send an email notification with the scraped jobs.
-        
-        Args:
-            jobs (list): Scraped job information.
-            sender (str): Sender email address.
-            recipients (list): Recipient email addresses.
-            password (str): Sender email password.
+    async def scrape_all_companies(self) -> List[Dict[str, Any]]:
+        """Scrape jobs from all configured companies.
         
         Returns:
-            bool: True if the email was sent successfully, False otherwise.
+            List[Dict[str, Any]]: List of all job dictionaries.
+        """
+        if not self.companies:
+            logger.warning("No companies configured")
+            return []
+        
+        logger.info(f"Starting to scrape {len(self.companies)} companies")
+        
+        all_jobs = []
+        
+        # Process companies sequentially to avoid overwhelming servers
+        for company in self.companies:
+            try:
+                company_jobs = await self.scrape_company(company)
+                all_jobs.extend(company_jobs)
+                
+                # Update job IDs dictionary
+                if company_jobs:
+                    company_name = company.split('.')[0]  # Extract company name from URL
+                    job_ids = [job['job_id'] for job in company_jobs if 'job_id' in job]
+                    self.job_ids_dict[company_name] = job_ids
+                    
+            except Exception as e:
+                logger.error(f"Error scraping company {company}: {str(e)}")
+                continue
+        
+        logger.info(f"Completed scraping all companies. Total jobs found: {len(all_jobs)}")
+        return all_jobs
+    
+    def save_results(self, jobs: List[Dict[str, Any]]) -> tuple:
+        """Save jobs to database.
+        
+        Args:
+            jobs (List[Dict[str, Any]]): List of job dictionaries to save.
+            
+        Returns:
+            tuple: (saved_count, failed_count)
         """
         if not jobs:
-            logger.warning("No jobs to send email for")
-            return False
+            logger.info("No jobs to save")
+            return 0, 0
+        
+        logger.info(f"Saving {len(jobs)} jobs to database")
+        saved, failed = self.db_manager.save_jobs(jobs)
+        logger.info(f"Saved {saved} jobs to database, {failed} failed")
+        return saved, failed
+    
+    async def run(self) -> Dict[str, Any]:
+        """Run the scraper.
+        
+        Returns:
+            Dict[str, Any]: Results summary.
+        """
+        start_time = time.time()
         
         try:
-            # Compose email body
-            body = f"""<html>
-<body>
-<h1>Workday Scraper: Job Postings</h1>
-<p>Found {len(jobs)} job postings:</p>
-<ul>
-"""
+            # Scrape all companies
+            jobs = await self.scrape_all_companies()
             
-            for job in jobs:
-                title = job.get('title', 'Unknown Title')
-                company = job.get('company', 'Unknown Company')
-                url = job.get('url', '#')
-                date_posted = job.get('date_posted', '')
-                location = job.get('location', '')
-                
-                body += f"""<li>
-<a href="{url}"><strong>{company}: {title}</strong></a>
-<br>Location: {location}
-<br>Posted: {date_posted}
-</li>
-"""
+            # Save results to database
+            saved, failed = self.save_results(jobs)
             
-            body += """</ul>
-<p>This email was sent automatically by the Workday Scraper.</p>
-</body>
-</html>"""
+            # Save job IDs
+            self.save_job_ids()
             
-            # Send email
-            import smtplib
-            from email.mime.multipart import MIMEMultipart
-            from email.mime.text import MIMEText
+            end_time = time.time()
+            duration = end_time - start_time
             
-            msg = MIMEMultipart()
-            msg['From'] = sender
-            msg['To'] = ", ".join(recipients)
-            msg['Subject'] = "Workday Scraper: Today's Jobs"
+            results = {
+                "total_jobs": len(jobs),
+                "saved_jobs": saved,
+                "failed_jobs": failed,
+                "companies_scraped": len(self.companies),
+                "duration_seconds": duration,
+                "success": True
+            }
             
-            msg.attach(MIMEText(body, 'html'))
+            logger.info(f"Scraping completed successfully", extra=results)
+            return results
             
-            server = smtplib.SMTP('smtp.gmail.com', 587)
-            server.starttls()
-            server.login(sender, password)
-            server.send_message(msg)
-            server.quit()
-            
-            logger.info(f"Sent email notification to {len(recipients)} recipients")
-            return True
         except Exception as e:
-            logger.error(f"Error sending email: {str(e)}")
-            return False
+            logger.error(f"Error during scraping: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "duration_seconds": time.time() - start_time
+            }
     
     def cleanup(self):
         """Clean up resources."""
-        # No browser sessions to clean up with JSON-LD approach
+        if self.db_manager:
+            self.db_manager.close()
         logger.info("Cleanup completed")
 
 
-async def run_scraper(args):
+async def run_scraper(args: Dict[str, Any]) -> Dict[str, Any]:
     """Run the scraper with the given arguments.
     
     Args:
-        args (dict): Command-line arguments.
-    
+        args (Dict[str, Any]): Arguments dictionary containing scraper configuration.
+        
     Returns:
-        list: Scraped job information.
+        Dict[str, Any]: Results summary.
     """
-    # Extract arguments
-    config_file = args["file"]
-    initial = args["initial"]
-    output_json = args.get("json", False)
-    output_rss = args.get("rss", False)
-    concurrency = args.get("max_workers", 10)  # Use max_workers as concurrency
-    log_file = args.get("log_file", "workday_scraper.log")
-    log_level = args.get("log_level", "INFO")
-    # Determine base directory based on environment
-    in_docker = os.path.exists("/.dockerenv")
-    base_dir = "/app" if in_docker else os.getcwd()
-    
-    # Set DB file path
-    db_file = args.get("db_file") or os.environ.get("DB_FILE", os.path.join(base_dir, "data/workday_jobs.db"))
-    
-    # Email arguments
-    sender = args.get("email")
-    password = args.get("password")
-    recipients_str = args.get("recipients")
-    recipients = recipients_str.split(",") if recipients_str else []
-    
-    # Create and run the scraper
-    scraper = WorkdayScraper(
-        config_file=config_file,
-        initial=initial,
-        concurrency=concurrency,
-        log_file=log_file,
-        log_level=log_level,
-        db_file=db_file
-    )
-    
-    # Initialize the Telegram bot if environment variables are set
-    telegram_bot = None
-    if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-        try:
-            # Import here to avoid circular imports
-            from .telegram_bot import initialize_bot
-            # Initialize the bot with the same database manager as the scraper
-            telegram_bot = await initialize_bot(scraper.db_manager)
-            logger.info("Telegram bot initialized for notifications")
-        except Exception as e:
-            logger.error(f"Error initializing Telegram bot: {str(e)}")
-            telegram_bot = None
-    
+    scraper = None
     try:
-        # Scrape all companies
-        jobs = await scraper.scrape_all_companies()
+        # Get base directory using reliable path resolution
+        base_dir = get_base_dir()
         
-        # Save results
-        scraper.save_results(jobs, output_json=output_json, output_rss=output_rss)
+        # Get environment-specific paths
+        db_file = args.get("db_file") or os.environ.get("DB_FILE", os.path.join(get_data_dir(), "workday_jobs.db"))
         
-        # Send email notification if requested
-        if sender and recipients and password and jobs:
-            scraper.send_email_notification(jobs, sender, recipients, password)
+        # Create scraper instance
+        scraper = WorkdayScraper(
+            config_file=args.get("file"),
+            initial=args.get("initial", False),
+            max_workers=args.get("max_workers", 5),
+            max_sessions=args.get("max_sessions", 3),
+            chunk_size=args.get("chunk_size", 10),
+            db_file=db_file
+        )
         
-        # Send Telegram notification if bot is initialized and jobs were found
-        if telegram_bot and jobs:
+        # Run the scraper
+        results = await scraper.run()
+        
+        # Handle output formats
+        if args.get("json"):
+            output_file = args.get("output", "workday_jobs.json")
+            if not os.path.isabs(output_file):
+                output_file = os.path.join(get_data_dir(), output_file)
+            
+            jobs = scraper.db_manager.get_all_jobs()
+            import json
+            with open(output_file, 'w') as f:
+                json.dump(jobs, f, indent=2)
+            logger.info(f"Exported {len(jobs)} jobs to JSON: {output_file}")
+        
+        if args.get("rss"):
+            output_file = args.get("output", "workday_jobs.xml")
+            if not os.path.isabs(output_file):
+                output_file = os.path.join(get_data_dir(), output_file)
+            
+            jobs = scraper.db_manager.get_all_jobs()
+            rss_content = generate_rss(jobs)
+            with open(output_file, 'w') as f:
+                f.write(rss_content)
+            logger.info(f"Generated RSS feed with {len(jobs)} jobs: {output_file}")
+        
+        # Send email if configured
+        email_sender = args.get("email")
+        email_password = args.get("password")
+        email_recipients = args.get("recipients")
+        
+        if email_sender and email_password and email_recipients:
             try:
-                logger.info("Sending Telegram notification")
-                await telegram_bot.send_notification(jobs)
+                jobs = scraper.db_manager.get_all_jobs()
+                recipients_list = email_recipients.split(',')
+                email_body = compose_email(jobs)
+                send_email("Workday Scraper - Job Postings", email_body, email_sender, recipients_list, email_password)
+                logger.info(f"Sent email with {len(jobs)} jobs to {len(recipients_list)} recipients")
             except Exception as e:
-                logger.error(f"Error sending Telegram notification: {str(e)}")
+                logger.error(f"Error sending email: {str(e)}")
         
-        return jobs
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in run_scraper: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
     finally:
-        # Clean up resources
-        scraper.cleanup()
-        # Close database connection
-        scraper.db_manager.close()
+        if scraper:
+            scraper.cleanup()
 

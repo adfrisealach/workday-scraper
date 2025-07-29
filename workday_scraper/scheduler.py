@@ -18,6 +18,7 @@ logger = get_logger()
 
 from .logging_utils import get_logger
 from .scraper_controller import run_scraper
+from .path_utils import get_base_dir, get_data_dir, get_logs_dir
 
 logger = get_logger()
 
@@ -140,7 +141,33 @@ class ScraperScheduler:
                 try:
                     # Run the scraper with default config
                     config_file = os.environ.get("CONFIG_FILE", "autodesk.txt")
-                    await run_scraper(config_file=config_file)
+                    
+                    # Get environment-specific paths using reliable path resolution
+                    base_dir = get_base_dir()
+                    
+                    # Get environment-specific paths
+                    db_file = os.environ.get("DB_FILE", os.path.join(get_data_dir(), "workday_jobs.db"))
+                    log_file = os.environ.get("LOG_FILE", os.path.join(get_logs_dir(), "workday_scraper.log"))
+                    
+                    # Create the arguments dictionary that run_scraper expects
+                    args = {
+                        "file": config_file,
+                        "initial": False,  # Don't scrape all jobs, just new ones
+                        "json": False,     # Don't output JSON
+                        "rss": False,      # Don't output RSS
+                        "max_workers": int(os.environ.get("MAX_WORKERS", "5")),
+                        "max_sessions": int(os.environ.get("MAX_SESSIONS", "3")),
+                        "chunk_size": int(os.environ.get("CHUNK_SIZE", "10")),
+                        "log_file": log_file,
+                        "log_level": os.environ.get("LOG_LEVEL", "INFO"),
+                        "db_file": db_file,
+                        "no_headless": True,  # Always run headless in scheduled mode
+                        "email": os.environ.get("EMAIL_SENDER"),
+                        "password": os.environ.get("EMAIL_PASSWORD"),
+                        "recipients": os.environ.get("EMAIL_RECIPIENTS")
+                    }
+                    
+                    await run_scraper(args)
                     logger.info("Scheduled scraper run completed")
                 except Exception as e:
                     logger.error(f"Error in scheduled scraper run: {str(e)}")
