@@ -171,8 +171,9 @@ async def get_all_job_urls(base_url: str) -> List[str]:
                 "div.pagination a:last-child:not([disabled])",
                 "button[aria-label*='next']:not([disabled])",
                 "a[aria-label*='next']:not([disabled])",
-                "a:has-text('2'):not([disabled])",
-                "button:has-text('2'):not([disabled])"
+                # Removed numbered button selectors that cause duplicate page navigation:
+                # "a:has-text('2'):not([disabled])",
+                # "button:has-text('2'):not([disabled])"
             ]
             
             # Try each selector
@@ -204,7 +205,7 @@ async def get_all_job_urls(base_url: str) -> List[str]:
             if next_button:
                 logger.info(f"Clicking next page button to navigate to page {page_num + 1}")
                 await next_button.click()
-                await page.wait_for_timeout(2000)  # Longer wait for page update
+                await page.wait_for_timeout(2000)  # Wait for page update
                 page_num += 1
             else:
                 logger.info("No next page button found, reached the last page")
@@ -289,7 +290,7 @@ async def get_all_job_urls(base_url: str) -> List[str]:
                                 
                                 if alt_next_button:
                                     await alt_next_button.click()
-                                    await page.wait_for_timeout(2000)
+                                    await page.wait_for_timeout(2000)  # Wait for page update
                                     alt_page_num += 1
                                 else:
                                     alt_has_next_page = False
@@ -347,7 +348,7 @@ async def get_all_job_urls(base_url: str) -> List[str]:
                                 
                                 if next_btn:
                                     await next_btn.click()
-                                    await page.wait_for_timeout(2000)
+                                    await page.wait_for_timeout(2000)  # Wait for page update
                                     approach2_page_num += 1
                                 else:
                                     logger.info("Approach 2: No next page button found, reached the last page")
@@ -424,14 +425,21 @@ async def extract_job_details_from_jsonld(job_urls: List[str], concurrency: int 
         async with semaphore:
             try:
                 # Add jitter to avoid rate limiting - increase the delay
-                await asyncio.sleep(random.uniform(0.5, 1.0))
+                await asyncio.sleep(random.uniform(0.2, 0.5))  # Reduce delay for faster processing
                 
-                # Reduce timeout to avoid hanging requests
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                # Increase timeout and add connection pooling for better reliability
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),  # More granular timeouts
+                    limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)  # Connection pooling
+                ) as client:
                     headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                         'Accept-Language': 'en-US,en;q=0.5',
+                        'Accept-Encoding': 'gzip, deflate, br',  # Support compression
+                        'DNT': '1',
+                        'Connection': 'keep-alive',  # Keep connections alive for reuse
+                        'Upgrade-Insecure-Requests': '1',
                         # Add cache control headers to avoid cached responses
                         'Cache-Control': 'no-cache',
                         'Pragma': 'no-cache',
@@ -439,6 +447,11 @@ async def extract_job_details_from_jsonld(job_urls: List[str], concurrency: int 
                     
                     try:
                         response = await client.get(url, headers=headers, follow_redirects=True)
+                        
+                        if response.status_code == 429:  # Rate limited
+                            # Wait longer and retry
+                            await asyncio.sleep(random.uniform(2.0, 4.0))
+                            response = await client.get(url, headers=headers, follow_redirects=True)
                         
                         if response.status_code != 200:
                             raise Exception(f"HTTP error: {response.status_code}")
@@ -476,9 +489,11 @@ async def extract_job_details_from_jsonld(job_urls: List[str], concurrency: int 
                     
             except Exception as e:
                 if retry_count < max_retries:
-                    # Exponential backoff
-                    backoff_time = 2 ** retry_count
-                    logger.debug(f"Retrying {url} after {backoff_time}s (attempt {retry_count+1}/{max_retries})")
+                    # Exponential backoff with jitter to avoid thundering herd
+                    base_backoff = 2 ** retry_count
+                    jitter = random.uniform(0.5, 1.5)  # Add randomness
+                    backoff_time = base_backoff * jitter
+                    logger.debug(f"Retrying {url} after {backoff_time:.1f}s (attempt {retry_count+1}/{max_retries})")
                     await asyncio.sleep(backoff_time)
                     return await _fetch_and_extract(url, retry_count + 1)
                 else:
@@ -486,8 +501,8 @@ async def extract_job_details_from_jsonld(job_urls: List[str], concurrency: int 
                     failed_urls.append(url)
                     return {'url': url, 'error': str(e)}
     
-    # Process URLs in batches to avoid memory issues
-    batch_size = 50  # Process 50 URLs at a time
+    # Process URLs in smaller batches to reduce timeout risk and improve success rate
+    batch_size = 25  # Reduced from 50 to 25 URLs per batch for better reliability
     all_results = []
     
     for i in range(0, len(job_urls), batch_size):
@@ -497,15 +512,26 @@ async def extract_job_details_from_jsonld(job_urls: List[str], concurrency: int 
         # Process batch concurrently with a timeout
         tasks = [fetch_and_extract(url) for url in batch]
         try:
-            # Add a timeout for the batch (5 minutes per batch)
-            batch_results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=300)
+            # Reduced timeout per batch (3 minutes) since we have smaller batches
+            batch_results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=180)
             all_results.extend(batch_results)
             logger.info(f"Completed batch {i//batch_size + 1} with {len(batch_results)} results")
         except asyncio.TimeoutError:
-            logger.error(f"Batch {i//batch_size + 1} timed out after 5 minutes")
-            # Get results from completed tasks
-            completed_tasks = [task for task in tasks if task.done()]
-            batch_results = [task.result() for task in completed_tasks if not task.exception()]
+            logger.error(f"Batch {i//batch_size + 1} timed out after 3 minutes")
+            # Get results from completed tasks using asyncio.wait with timeout
+            done_tasks, pending_tasks = await asyncio.wait(tasks, timeout=0)
+            batch_results = []
+            for task in done_tasks:
+                try:
+                    result = task.result()
+                    batch_results.append(result)
+                except Exception as e:
+                    logger.debug(f"Task failed: {str(e)}")
+            
+            # Cancel pending tasks to free resources
+            for task in pending_tasks:
+                task.cancel()
+            
             all_results.extend(batch_results)
             logger.info(f"Retrieved {len(batch_results)} results from completed tasks in batch before timeout")
     
