@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.11.17-slim-bookworm
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -7,6 +7,7 @@ ENV TZ=America/Los_Angeles
 
 # Install essential system dependencies
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
         tzdata \
         dos2unix \
@@ -49,7 +50,8 @@ RUN mkdir -p /ms-playwright && \
 
 # Install Playwright from requirements.txt
 COPY requirements.txt .
-RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install --no-cache-dir -r requirements.txt && \
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 pip install --no-cache-dir -r requirements.txt && \
     # Show installed version for verification
     echo "Playwright $(pip show playwright | grep Version) installed" && \
     # Install system dependencies for Playwright
